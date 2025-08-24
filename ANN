@@ -1,0 +1,350 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.model_selection import KFold
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.regularizers import l1, l2, l1_l2
+from scikeras.wrappers import KerasRegressor
+import tensorflow as tf
+import warnings
+import optuna
+import joblib
+import json
+
+warnings.filterwarnings('ignore')
+
+# 固定随机种子
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# 输出路径设置
+output_dir = "F:\\Machine leaning_SHAP\\KNN2"
+os.makedirs(output_dir, exist_ok=True)
+
+
+def load_and_split_data(file_path):
+    try:
+        data = pd.read_excel(file_path)
+        print(f"Data loaded: {file_path}")
+        print(f"Total samples: {len(data)}")
+
+        features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+        target = "NEP"
+
+        missing_cols = [col for col in features + [target] if col not in data.columns]
+        if missing_cols:
+            raise ValueError(f"Missing columns: {missing_cols}")
+
+        data_clean = data[features + [target]].dropna()
+        print(f"Cleaned samples: {len(data_clean)}")
+
+        data_shuffled = data_clean.sample(frac=1, random_state=42).reset_index(drop=True)
+
+        train_size = 21888
+        val_size = 7344
+        test_size = 5856
+        required_total = train_size + val_size + test_size
+
+        if len(data_shuffled) < required_total:
+            print(f"Warning: Insufficient data. Need {required_total}, got {len(data_shuffled)}")
+            ratio = len(data_shuffled) / required_total
+            train_size = int(train_size * ratio)
+            val_size = int(val_size * ratio)
+            test_size = len(data_shuffled) - train_size - val_size
+            print(f"Adjusted split: Train {train_size}, Val {val_size}, Test {test_size}")
+
+        train_data = data_shuffled[:train_size]
+        val_data = data_shuffled[train_size:train_size + val_size]
+        test_data = data_shuffled[train_size + val_size:train_size + val_size + test_size]
+
+        print(f"Split completed:")
+        print(f"Train: {len(train_data)} samples")
+        print(f"Val: {len(val_data)} samples")
+        print(f"Test: {len(test_data)} samples")
+
+        return train_data, val_data, test_data, features
+
+    except Exception as e:
+        print(f"Data load failed: {e}")
+        return None, None, None, None
+
+
+def preprocess_data(train_data, val_data, test_data, features):
+    target = "NEP"
+
+    X_train = train_data[features].values
+    y_train = train_data[target].values
+    X_val = val_data[features].values
+    y_val = val_data[target].values
+    X_test = test_data[features].values
+    y_test = test_data[target].values
+
+    scaler_X = MinMaxScaler()
+    X_train_scaled = scaler_X.fit_transform(X_train)
+    X_val_scaled = scaler_X.transform(X_val)
+    X_test_scaled = scaler_X.transform(X_test)
+
+    scaler_y = MinMaxScaler()
+    y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+    y_val_scaled = scaler_y.transform(y_val.reshape(-1, 1)).flatten()
+    y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
+
+    return (X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled,
+            X_test_scaled, y_test_scaled, scaler_X, scaler_y)
+
+
+def create_ann_model(neurons=128, hidden_layers=3, dropout_rate=0.1, learning_rate=0.001,
+                     activation='relu', kernel_initializer='he_normal',
+                     kernel_regularizer=None, l1_ratio=0.01, l2_ratio=0.01,
+                     use_batch_norm=False):
+    model = Sequential()
+
+    if kernel_regularizer == 'l1':
+        regularizer = l1(l1_ratio)
+    elif kernel_regularizer == 'l2':
+        regularizer = l2(l2_ratio)
+    elif kernel_regularizer == 'l1_l2':
+        regularizer = l1_l2(l1=l1_ratio, l2=l2_ratio)
+    else:
+        regularizer = None
+
+    model.add(Dense(neurons, activation=activation, input_shape=(10,),
+                    kernel_initializer=kernel_initializer, kernel_regularizer=regularizer))
+    if use_batch_norm:
+        model.add(BatchNormalization())
+    model.add(Dropout(dropout_rate))
+
+    for _ in range(hidden_layers - 1):
+        model.add(Dense(neurons, activation=activation,
+                        kernel_initializer=kernel_initializer, kernel_regularizer=regularizer))
+        if use_batch_norm:
+            model.add(BatchNormalization())
+        model.add(Dropout(dropout_rate))
+
+    model.add(Dense(1))
+
+    model.compile(optimizer=Adam(learning_rate=learning_rate),
+                  loss='mse',
+                  metrics=['mae'])
+
+    return model
+
+
+def evaluate_model(y_true, y_pred, scaler_y=None):
+    if scaler_y is not None:
+        y_true = scaler_y.inverse_transform(y_true.reshape(-1, 1)).flatten()
+        y_pred = scaler_y.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+
+    return {'R²': r2, 'MAE': mae, 'MSE': mse, 'RMSE': rmse}
+
+
+def objective(trial, X_train, y_train, X_val, y_val):
+    neurons = trial.suggest_categorical('neurons', [64, 128, 256, 512])
+    hidden_layers = trial.suggest_int('hidden_layers', 1, 5)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.0, 0.5)
+    learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
+    batch_size = trial.suggest_categorical('batch_size', [16, 32, 64, 128])
+    activation = trial.suggest_categorical('activation', ['relu', 'elu', 'selu'])
+    kernel_initializer = trial.suggest_categorical('kernel_initializer',
+                                                   ['he_normal', 'he_uniform', 'glorot_normal', 'glorot_uniform'])
+    kernel_regularizer = trial.suggest_categorical('kernel_regularizer', [None, 'l1', 'l2', 'l1_l2'])
+    l1_ratio = trial.suggest_float('l1_ratio', 1e-5, 1e-2, log=True)
+    l2_ratio = trial.suggest_float('l2_ratio', 1e-5, 1e-2, log=True)
+    patience = trial.suggest_int('patience', 10, 50)
+    use_batch_norm = trial.suggest_categorical('use_batch_norm', [True, False])
+
+    model = create_ann_model(neurons=neurons, hidden_layers=hidden_layers,
+                             dropout_rate=dropout_rate, learning_rate=learning_rate,
+                             activation=activation, kernel_initializer=kernel_initializer,
+                             kernel_regularizer=kernel_regularizer, l1_ratio=l1_ratio,
+                             l2_ratio=l2_ratio, use_batch_norm=use_batch_norm)
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True)
+
+    model.fit(X_train, y_train, validation_data=(X_val, y_val),
+              epochs=100, batch_size=batch_size, callbacks=[early_stopping], verbose=0)
+
+    val_pred = model.predict(X_val)
+    val_mse = mean_squared_error(y_val, val_pred)
+
+    return val_mse
+
+
+def objective_cv(trial, X, y, n_splits=5):
+    params = {
+        'model__neurons': trial.suggest_categorical('neurons', [64, 128, 256, 512]),
+        'model__hidden_layers': trial.suggest_int('hidden_layers', 2, 5),
+        'model__dropout_rate': trial.suggest_float('dropout_rate', 0.0, 0.5),
+        'model__learning_rate': trial.suggest_float('learning_rate', 1e-4, 5e-3, log=True),
+        'model__activation': trial.suggest_categorical('activation', ['relu', 'elu', 'selu', 'tanh']),
+        'model__kernel_initializer': trial.suggest_categorical('kernel_initializer',
+                                                               ['he_normal', 'he_uniform', 'glorot_normal', 'glorot_uniform']),
+        'model__kernel_regularizer': trial.suggest_categorical('kernel_regularizer', [None, 'l1', 'l2', 'l1_l2']),
+        'model__l1_ratio': trial.suggest_float('l1_ratio', 1e-5, 1e-2, log=True),
+        'model__l2_ratio': trial.suggest_float('l2_ratio', 1e-5, 1e-2, log=True),
+        'model__use_batch_norm': trial.suggest_categorical('use_batch_norm', [True, False]),
+        'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
+        'epochs': 100
+    }
+
+    model = KerasRegressor(model=create_ann_model, verbose=0)
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+    scores = []
+    for train_idx, val_idx in kf.split(X):
+        X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+        y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+
+        for param_name, param_value in params.items():
+            setattr(model, param_name, param_value)
+
+        model.fit(X_train_fold, y_train_fold,
+                  validation_data=(X_val_fold, y_val_fold),
+                  callbacks=[EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)],
+                  verbose=0)
+
+        y_pred = model.predict(X_val_fold)
+        mse = mean_squared_error(y_val_fold, y_pred)
+        scores.append(mse)
+
+    return np.mean(scores)
+
+
+def main():
+    train_data, val_data, test_data, features = load_and_split_data("F:\\Machine leaning_SHAP\\数据集.xlsx")
+
+    if not all([train_data, val_data, test_data]):
+        print("Data load failed. Exiting.")
+        return
+
+    (X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled,
+     X_test_scaled, y_test_scaled, scaler_X, scaler_y) = preprocess_data(train_data, val_data, test_data, features)
+
+    print("Preprocessing completed")
+    print(f"Train shape: {X_train_scaled.shape[0]}")
+    print(f"Val shape: {X_val_scaled.shape[0]}")
+    print(f"Test shape: {X_test_scaled.shape[0]}")
+
+    train_data.to_excel(os.path.join(output_dir, 'train_dataset.xlsx'), index=False)
+    val_data.to_excel(os.path.join(output_dir, 'validation_dataset.xlsx'), index=False)
+    test_data.to_excel(os.path.join(output_dir, 'test_dataset.xlsx'), index=False)
+    print(f"Split datasets saved to: {output_dir}")
+
+    grid_search_best_params = {
+        'batch_size': 64,
+        'epochs': 50,
+        'model__dropout_rate': 0.1,
+        'model__hidden_layers': 3,
+        'model__learning_rate': 0.001,
+        'model__neurons': 128
+    }
+
+    print("Grid search best params:")
+    for param, value in grid_search_best_params.items():
+        print(f"{param}: {value}")
+
+    with open(os.path.join(output_dir, 'grid_search_best_params.json'), 'w') as f:
+        json.dump(grid_search_best_params, f, indent=4)
+
+    X_train_val = np.vstack((X_train_scaled, X_val_scaled))
+    y_train_val = np.concatenate((y_train_scaled, y_val_scaled))
+
+    print("\nStarting Optuna optimization...")
+    print("5-fold CV, 200 trials")
+
+    study = optuna.create_study(direction='minimize',
+                                study_name='ann_hyperparameter_optimization',
+                                pruner=optuna.pruners.MedianPruner())
+
+    study.optimize(lambda trial: objective_cv(trial, X_train_val, y_train_val, n_splits=5),
+                   n_trials=200,
+                   show_progress_bar=True)
+
+    best_params = study.best_params
+    print("\nOptuna best params:")
+    for param, value in best_params.items():
+        print(f"{param}: {value}")
+
+    with open(os.path.join(output_dir, 'optuna_best_params.json'), 'w') as f:
+        json.dump(best_params, f, indent=4)
+
+    joblib.dump(study, os.path.join(output_dir, 'optuna_study.pkl'))
+
+    final_model = create_ann_model(
+        neurons=best_params.get('neurons', 128),
+        hidden_layers=best_params.get('hidden_layers', 3),
+        dropout_rate=best_params.get('dropout_rate', 0.1),
+        learning_rate=best_params.get('learning_rate', 0.001),
+        activation=best_params.get('activation', 'relu'),
+        kernel_initializer=best_params.get('kernel_initializer', 'he_normal'),
+        kernel_regularizer=best_params.get('kernel_regularizer', None),
+        l1_ratio=best_params.get('l1_ratio', 0.01),
+        l2_ratio=best_params.get('l2_ratio', 0.01),
+        use_batch_norm=best_params.get('use_batch_norm', False)
+    )
+
+    callbacks = [
+        EarlyStopping(monitor='val_loss', patience=best_params.get('patience', 20), restore_best_weights=True),
+        ModelCheckpoint(os.path.join(output_dir, 'best_ann_model.h5'),
+                        monitor='val_loss', save_best_only=True)
+    ]
+
+    print("\nTraining final model...")
+    history = final_model.fit(
+        X_train_scaled, y_train_scaled,
+        validation_data=(X_val_scaled, y_val_scaled),
+        epochs=100,
+        batch_size=best_params.get('batch_size', 64),
+        callbacks=callbacks,
+        verbose=1
+    )
+
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['loss'], label='Train Loss')
+    plt.plot(history.history['val_loss'], label='Val Loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['mae'], label='Train MAE')
+    plt.plot(history.history['val_mae'], label='Val MAE')
+    plt.title('Model MAE')
+    plt.xlabel('Epoch')
+    plt.ylabel('MAE')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'ann_loss_curves.png'))
+    plt.close()
+
+    y_train_pred = final_model.predict(X_train_scaled)
+    y_val_pred = final_model.predict(X_val_scaled)
+    y_test_pred = final_model.predict(X_test_scaled)
+
+    train_metrics = evaluate_model(y_train_scaled, y_train_pred, scaler_y)
+    val_metrics = evaluate_model(y_val_scaled, y_val_pred, scaler_y)
+    test_metrics = evaluate_model(y_test_scaled, y_test_pred, scaler_y)
+
+    print("\nTrain metrics:")
+    for metric, value in train_metrics.items():
+        print(f"{metric}: {value:.4f}")
+
+    print("\nVal metrics:")
+    for metric, value in val_metrics.items():
+        print(f"{metric}: {value:.4f}")
+
+    print("\nTest
