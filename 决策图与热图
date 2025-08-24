@@ -32,19 +32,7 @@ print("=" * 60)
 print("SHAP可视化 - 决策图和热力图（蓝-白-红配色，无加粗字体）")
 print("=" * 60)
 # 检查SHAP数据文件是否存在
-if not os.path.exists(shap_data_path):
-    print(f"❌ 错误：找不到SHAP数据文件: {shap_data_path}")
-    print("请先运行完整的TabNet_Enhanced_Simplified.py生成SHAP数据")
-    exit()
-# 检查特征重要性文件是否存在
-if not os.path.exists(feature_importance_path):
-    print(f"❌ 错误：找不到特征重要性文件: {feature_importance_path}")
-    print("请先运行完整的TabNet_Enhanced_Simplified.py生成特征重要性数据")
-    exit()
-# 检查输出目录是否存在，如果不存在则创建
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-    print(f"✅ 创建输出目录: {output_dir}")
+
 # 加载SHAP数据
 print("正在加载预计算的SHAP数据...")
 try:
@@ -62,25 +50,25 @@ try:
     background_size = int(shap_data_loaded['background_size'])
     shap_size = int(shap_data_loaded['shap_size'])
     
-    print(f"✅ SHAP数据加载成功!")
+    print(f" SHAP数据加载成功!")
     print(f"   - SHAP值矩阵形状: {shap_values_array.shape}")
     print(f"   - 特征数据形状: {shap_data_array.shape}")
     print(f"   - 基准值: {expected_value:.4f}")
     print(f"   - 样本数量: {shap_size}")
     
 except Exception as e:
-    print(f"❌ 加载SHAP数据时出错: {str(e)}")
+    print(f" 加载SHAP数据时出错: {str(e)}")
     exit()
 # 加载特征重要性数据
 print("正在加载特征重要性数据...")
 try:
     feature_importance_data = np.load(feature_importance_path, allow_pickle=True)
     feature_importance = feature_importance_data['feature_importance']
-    print(f"✅ 特征重要性数据加载成功!")
+    print(f" 特征重要性数据加载成功!")
     print(f"   - 特征重要性形状: {feature_importance.shape}")
     
 except Exception as e:
-    print(f"❌ 加载特征重要性数据时出错: {str(e)}")
+    print(f" 加载特征重要性数据时出错: {str(e)}")
     # 如果没有特征重要性文件，计算平均绝对SHAP值作为重要性
     feature_importance = np.abs(shap_values_array).mean(0)
     print("使用平均绝对SHAP值作为特征重要性")
@@ -142,7 +130,7 @@ plt.savefig(os.path.join(output_dir, 'shap_decision_plot_500_samples.png'),
 plt.savefig(os.path.join(output_dir, 'shap_decision_plot_500_samples.tiff'), 
            dpi=300, bbox_inches='tight', facecolor='white')
 plt.close()
-print("✅ SHAP决策图创建成功")
+print(" SHAP决策图创建成功")
 # ==================== 2. SHAP值热力图（蓝-白-红配色） ====================
 print("\n=== 创建SHAP值热力图（蓝-白-红配色） ===")
 # 选择样本用于热力图（200个样本）
@@ -195,7 +183,7 @@ plt.savefig(os.path.join(output_dir, 'shap_values_heatmap_blue_white_red.png'),
 plt.savefig(os.path.join(output_dir, 'shap_values_heatmap_blue_white_red.tiff'), 
            dpi=300, bbox_inches='tight', facecolor='white')
 plt.close()
-print("✅ 蓝-白-红配色热力图创建成功")
+print("蓝-白-红配色热力图创建成功")
 print("\n" + "=" * 60)
 print("SHAP可视化完成！（蓝-白-红配色，无加粗字体）")
 print("=" * 60)
