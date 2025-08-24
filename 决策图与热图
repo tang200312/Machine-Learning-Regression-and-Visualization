@@ -1,0 +1,205 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.patches import Patch
+from datetime import datetime
+import warnings
+import shap
+warnings.filterwarnings('ignore')
+# 字体设置 - 仅英文，无加粗
+def setup_fonts():
+    """设置字体配置，仅英文，无加粗"""
+    plt.rcParams['font.family'] = ['Times New Roman']
+    plt.rcParams['font.serif'] = ['Times New Roman']
+    plt.rcParams['axes.unicode_minus'] = False
+    plt.rcParams['font.size'] = 12
+    plt.rcParams['axes.titlesize'] = 14
+    plt.rcParams['axes.labelsize'] = 12
+    plt.rcParams['xtick.labelsize'] = 10
+    plt.rcParams['ytick.labelsize'] = 10
+    plt.rcParams['legend.fontsize'] = 10
+    plt.rcParams['font.weight'] = 'normal'  # 确保字体不加粗
+    plt.rcParams['axes.titleweight'] = 'normal'  # 标题不加粗
+    plt.rcParams['axes.labelweight'] = 'normal'  # 轴标签不加粗
+setup_fonts()
+# 设置路径
+output_dir = r"F:\Machine leaning_SHAP\TabNet\figure"
+shap_data_path = r"F:\Machine leaning_SHAP\TabNet\date_shap\shap_data.npz"
+feature_importance_path = r"F:\Machine leaning_SHAP\TabNet\date_shap\feature_importance_data.npz"
+print("=" * 60)
+print("SHAP可视化 - 决策图和热力图（蓝-白-红配色，无加粗字体）")
+print("=" * 60)
+# 检查SHAP数据文件是否存在
+if not os.path.exists(shap_data_path):
+    print(f"❌ 错误：找不到SHAP数据文件: {shap_data_path}")
+    print("请先运行完整的TabNet_Enhanced_Simplified.py生成SHAP数据")
+    exit()
+# 检查特征重要性文件是否存在
+if not os.path.exists(feature_importance_path):
+    print(f"❌ 错误：找不到特征重要性文件: {feature_importance_path}")
+    print("请先运行完整的TabNet_Enhanced_Simplified.py生成特征重要性数据")
+    exit()
+# 检查输出目录是否存在，如果不存在则创建
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+    print(f"✅ 创建输出目录: {output_dir}")
+# 加载SHAP数据
+print("正在加载预计算的SHAP数据...")
+try:
+    shap_data_loaded = np.load(shap_data_path, allow_pickle=True)
+    
+    # 提取数据
+    shap_values_array = shap_data_loaded['shap_values']
+    shap_data_array = shap_data_loaded['shap_data']
+    expected_value = float(shap_data_loaded['expected_value'])
+    features = shap_data_loaded['features'].tolist()
+    feature_names_en = shap_data_loaded['feature_names_en'].item()
+    feature_units = shap_data_loaded['feature_units'].item()
+    background_data = shap_data_loaded['background_data']
+    y_test_subset = shap_data_loaded['y_test_subset']
+    background_size = int(shap_data_loaded['background_size'])
+    shap_size = int(shap_data_loaded['shap_size'])
+    
+    print(f"✅ SHAP数据加载成功!")
+    print(f"   - SHAP值矩阵形状: {shap_values_array.shape}")
+    print(f"   - 特征数据形状: {shap_data_array.shape}")
+    print(f"   - 基准值: {expected_value:.4f}")
+    print(f"   - 样本数量: {shap_size}")
+    
+except Exception as e:
+    print(f"❌ 加载SHAP数据时出错: {str(e)}")
+    exit()
+# 加载特征重要性数据
+print("正在加载特征重要性数据...")
+try:
+    feature_importance_data = np.load(feature_importance_path, allow_pickle=True)
+    feature_importance = feature_importance_data['feature_importance']
+    print(f"✅ 特征重要性数据加载成功!")
+    print(f"   - 特征重要性形状: {feature_importance.shape}")
+    
+except Exception as e:
+    print(f"❌ 加载特征重要性数据时出错: {str(e)}")
+    # 如果没有特征重要性文件，计算平均绝对SHAP值作为重要性
+    feature_importance = np.abs(shap_values_array).mean(0)
+    print("使用平均绝对SHAP值作为特征重要性")
+# 创建带单位的特征名称函数
+def get_feature_name_with_unit(feature_name):
+    """获取带单位的特征名称"""
+    if feature_name in feature_units:
+        return f"{feature_name} ({feature_units[feature_name]})"
+    return feature_name
+# 学术论文字体设置 - 无加粗
+plt.rcParams.update({
+    'font.family': 'Times New Roman',
+    'font.size': 14,
+    'axes.titlesize': 18,
+    'axes.labelsize': 16,
+    'xtick.labelsize': 14,
+    'ytick.labelsize': 14,
+    'legend.fontsize': 14,
+    'figure.titlesize': 20,
+    'axes.linewidth': 1.5,
+    'grid.linewidth': 1.0,
+    'lines.linewidth': 2.0,
+    'font.weight': 'normal',  # 所有字体不加粗
+    'axes.titleweight': 'normal',  # 标题不加粗
+    'axes.labelweight': 'normal',  # 轴标签不加粗
+    'figure.titleweight': 'normal'  # 图形标题不加粗
+})
+print("\n" + "=" * 60)
+print("开始绘制SHAP决策图和热力图（蓝-白-红配色，无加粗字体）")
+print("=" * 60)
+# ==================== 1. SHAP决策图（500个样本） ====================
+print("\n=== 创建SHAP决策图（500个样本） ===")
+# 选择500个样本用于决策图
+n_samples_decision = min(500, len(shap_values_array))
+sample_indices = np.random.choice(len(shap_values_array), n_samples_decision, replace=False)
+print(f"正在绘制 {n_samples_decision} 个样本的决策图...")
+# 准备特征名称
+feature_names_list = [feature_names_en[f] for f in features]
+# 创建决策图
+fig, ax = plt.subplots(figsize=(14, 12))
+# 使用SHAP的decision_plot函数，使用默认配色
+shap.decision_plot(
+    expected_value,
+    shap_values_array[sample_indices],
+    feature_names=feature_names_list,
+    show=False,
+    new_base_value=0,
+    highlight=0
+)
+plt.title(f'SHAP Decision Plot - {n_samples_decision} Samples\nCumulative Feature Contributions to Predictions', 
+          fontsize=18, pad=20, weight='normal')  # 明确设置标题不加粗
+plt.xlabel('Model Output (g C m⁻²)', fontsize=16, weight='normal')  # 明确设置不加粗
+plt.ylabel('Features (ordered by importance)', fontsize=16, weight='normal')  # 明确设置不加粗
+# 调整布局
+plt.tight_layout()
+# 保存决策图
+plt.savefig(os.path.join(output_dir, 'shap_decision_plot_500_samples.png'), 
+           dpi=300, bbox_inches='tight', facecolor='white')
+plt.savefig(os.path.join(output_dir, 'shap_decision_plot_500_samples.tiff'), 
+           dpi=300, bbox_inches='tight', facecolor='white')
+plt.close()
+print("✅ SHAP决策图创建成功")
+# ==================== 2. SHAP值热力图（蓝-白-红配色） ====================
+print("\n=== 创建SHAP值热力图（蓝-白-红配色） ===")
+# 选择样本用于热力图（200个样本）
+n_samples_heatmap = min(200, len(shap_values_array))
+heatmap_sample_indices = np.random.choice(len(shap_values_array), n_samples_heatmap, replace=False)
+print(f"正在绘制 {n_samples_heatmap} 个样本的SHAP值热力图...")
+# 按特征重要性排序，只取前10个最重要的特征
+sorted_feature_indices = np.argsort(feature_importance)[::-1][:10]
+sorted_feature_names = [feature_names_en[features[i]] for i in sorted_feature_indices]
+# 准备热力图数据
+heatmap_data = shap_values_array[heatmap_sample_indices][:, sorted_feature_indices]
+# 创建热力图
+fig, ax = plt.subplots(figsize=(14, 10))
+# 使用matplotlib的imshow创建热力图，使用蓝-白-红配色
+im = ax.imshow(heatmap_data.T, cmap='RdBu_r', aspect='auto', 
+               vmin=heatmap_data.min(), vmax=heatmap_data.max())
+# 设置y轴标签（特征名称）
+ax.set_yticks(range(len(sorted_feature_names)))
+ax.set_yticklabels(sorted_feature_names, fontsize=14)
+# 设置x轴
+ax.set_xlabel('Instances', fontsize=16, weight='normal')
+ax.set_xticks([0, 25, 50, 75, 100, 125, 150, 175])
+ax.set_xticklabels([0, 25, 50, 75, 100, 125, 150, 175], fontsize=12)
+# 设置标题
+ax.set_title(f'SHAP Values Heatmap\n({n_samples_heatmap} samples × {len(sorted_feature_names)} features)', 
+            fontsize=18, pad=20, weight='normal')
+# 添加颜色条
+cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+cbar.set_label('SHAP value (impact on model output)', fontsize=14, weight='normal', rotation=90)
+cbar.ax.tick_params(labelsize=12)
+# 添加f(x)线（预测值变化）
+# 计算每个样本的预测值
+predictions = expected_value + np.sum(heatmap_data, axis=1)
+# 标准化到合适的范围用于显示
+norm_predictions = (predictions - predictions.min()) / (predictions.max() - predictions.min())
+# 调整到热力图上方的位置
+norm_predictions = norm_predictions * 1.5 + len(sorted_feature_names) + 0.5
+# 在热力图上方添加f(x)线
+ax.plot(range(len(predictions)), norm_predictions, 'k-', linewidth=2, alpha=0.8)
+ax.text(-10, len(sorted_feature_names) + 1.2, 'f(x)', fontsize=16, weight='normal', 
+        rotation=0, ha='center', va='center')
+# 设置y轴范围以包含f(x)线
+ax.set_ylim(-0.5, len(sorted_feature_names) + 2)
+# 反转y轴使特征顺序与右图一致
+ax.invert_yaxis()
+plt.tight_layout()
+# 保存热力图
+plt.savefig(os.path.join(output_dir, 'shap_values_heatmap_blue_white_red.png'), 
+           dpi=300, bbox_inches='tight', facecolor='white')
+plt.savefig(os.path.join(output_dir, 'shap_values_heatmap_blue_white_red.tiff'), 
+           dpi=300, bbox_inches='tight', facecolor='white')
+plt.close()
+print("✅ 蓝-白-红配色热力图创建成功")
+print("\n" + "=" * 60)
+print("SHAP可视化完成！（蓝-白-红配色，无加粗字体）")
+print("=" * 60)
+print("生成的图表文件:")
+print(f"- SHAP决策图 ({n_samples_decision}个样本): shap_decision_plot_500_samples.png/tiff")
+print(f"- SHAP值热力图（蓝-白-红配色）: shap_values_heatmap_blue_white_red.png/tiff")
+print(f"\n所有文件已保存至: {output_dir}")
