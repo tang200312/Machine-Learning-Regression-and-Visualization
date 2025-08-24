@@ -1,0 +1,670 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.model_selection import GridSearchCV, KFold, train_test_split
+import os
+import time
+import joblib
+from tqdm import tqdm
+import optuna
+from optuna.samplers import TPESampler
+import warnings
+
+# 忽略一些不重要的警告
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+
+# 设置中文显示和字体配置
+plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS', 'Microsoft YaHei']
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['mathtext.default'] = 'regular'  # 设置数学文本默认格式
+
+# 创建输出目录（如果不存在）
+output_dir = "F:\\Machine leaning_SHAP\\Ridge"
+os.makedirs(output_dir, exist_ok=True)
+
+# 设置中文显示
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+
+# 读取数据
+print("正在读取数据...")
+data = pd.read_excel("F:\\Machine leaning_SHAP\\数据集.xlsx")
+print(f"数据读取完成! 总数据量: {data.shape[0]}行")
+
+# 定义特征和目标变量
+features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+target = "NEP"
+
+# 提取特征和目标变量
+X = data[features]
+y = data[target]
+
+# 数据集划分
+print("正在划分数据集...")
+# 总数据量
+total_samples = len(data)
+print(f"总数据量: {total_samples}")
+
+# 计算划分比例
+train_size = 21888
+val_size = 7344
+test_size = 5856
+
+# 检查数据量是否足够
+required_total = train_size + val_size + test_size
+if total_samples < required_total:
+    print(f"警告: 数据量不足! 需要{required_total}条，实际只有{total_samples}条")
+    # 按比例调整
+    train_ratio = train_size / required_total
+    val_ratio = val_size / required_total
+    test_ratio = test_size / required_total
+
+    train_size = int(total_samples * train_ratio)
+    val_size = int(total_samples * val_ratio)
+    test_size = total_samples - train_size - val_size
+
+    print(f"调整后: 训练集{train_size}条, 验证集{val_size}条, 测试集{test_size}条")
+
+# 首先分离出测试集
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=test_size, random_state=42, shuffle=True
+)
+
+# 然后从剩余数据中分离训练集和验证集
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=val_size, random_state=42, shuffle=True
+)
+
+print(f"数据集划分完成!")
+print(f"训练集: {X_train.shape[0]}行")
+print(f"验证集: {X_val.shape[0]}行")
+print(f"测试集: {X_test.shape[0]}行")
+
+# 数据归一化
+print("正在进行数据归一化...")
+scaler = MinMaxScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_test_scaled = scaler.transform(X_test)
+print("数据归一化完成!")
+
+# 合并训练集和验证集用于交叉验证
+X_train_val = np.vstack((X_train_scaled, X_val_scaled))
+y_train_val = np.concatenate((y_train.values, y_val.values))
+
+
+# 定义评估函数
+def evaluate_model(y_true, y_pred, dataset_name):
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+
+    print(f"{dataset_name} 评估指标:")
+    print(f"R² = {r2:.4f}")
+    print(f"MAE = {mae:.4f}")
+    print(f"MSE = {mse:.4f}")
+    print(f"RMSE = {rmse:.4f}")
+    print("\n")
+
+    return {
+        "R²": r2,
+        "MAE": mae,
+        "MSE": mse,
+        "RMSE": rmse
+    }
+
+
+# 定义网格搜索的参数范围
+param_grid = {
+    'alpha': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0],  # 正则化强度
+    'solver': ['auto', 'svd', 'cholesky', 'lsqr', 'sparse_cg', 'sag', 'saga']
+}
+
+# 3折交叉验证
+print("\n" + "=" * 50)
+print("开始3折交叉验证...")
+start_time = time.time()
+
+kf = KFold(n_splits=3, shuffle=True, random_state=42)
+
+# 使用网格搜索找到最佳参数
+print("正在进行网格搜索...")
+ridge = Ridge()
+
+# 计算总参数组合数
+total_combinations = len(param_grid['alpha']) * len(param_grid['solver'])
+print(f"总共需要评估 {total_combinations} 种参数组合，每种组合进行3折交叉验证")
+
+# 使用简单的verbose显示进度，移除n_jobs=-1以避免中文路径编码问题
+grid_search = GridSearchCV(
+    ridge,
+    param_grid,
+    cv=kf,
+    scoring='neg_mean_squared_error',
+    verbose=2,  # 显示详细进度
+    n_jobs=1  # 使用单进程避免中文路径编码问题
+)
+
+# 执行网格搜索
+print("开始网格搜索...")
+grid_search.fit(X_train_val, y_train_val)
+
+# 输出最佳参数
+print("\n网格搜索最佳参数:")
+print(grid_search.best_params_)
+print(f"最佳MSE: {-grid_search.best_score_:.4f}")
+print(f"最佳RMSE: {np.sqrt(-grid_search.best_score_):.4f}")
+
+end_time = time.time()
+print(f"网格搜索耗时: {end_time - start_time:.2f}秒")
+print("=" * 50 + "\n")
+
+# 保存网格搜索结果
+grid_results = pd.DataFrame(grid_search.cv_results_)
+grid_results.to_excel(os.path.join(output_dir, "Ridge_网格搜索结果.xlsx"), index=False)
+
+# 获取网格搜索的最佳参数
+best_alpha = grid_search.best_params_['alpha']
+best_solver = grid_search.best_params_['solver']
+
+# 使用最佳参数创建最终模型
+final_model = Ridge(alpha=best_alpha, solver=best_solver)
+
+# 训练最终模型
+print("训练最终模型...")
+final_model.fit(X_train_scaled, y_train)
+print("最终模型训练完成!")
+
+# 保存模型
+print("正在保存模型...")
+joblib.dump(final_model, os.path.join(output_dir, "Ridge_最终模型.pkl"))
+joblib.dump(scaler, os.path.join(output_dir, "Ridge_特征缩放器.pkl"))
+print("模型保存完成!")
+
+# 预测
+print("\n正在进行预测...")
+y_train_pred = final_model.predict(X_train_scaled)
+y_val_pred = final_model.predict(X_val_scaled)
+y_test_pred = final_model.predict(X_test_scaled)
+print("预测完成!")
+
+# 绘制网格搜索结果图
+print("\n正在绘制网格搜索结果图...")
+plt.figure(figsize=(12, 6))
+
+# 提取网格搜索的结果
+grid_results_sorted = grid_results.sort_values('mean_test_score', ascending=False)
+top_grid_scores = -grid_results_sorted['mean_test_score'].values[:20]  # 取前20个最好的结果
+
+# 绘制网格搜索结果
+plt.plot(range(1, len(top_grid_scores) + 1), top_grid_scores, 'bo-')
+plt.xlabel('参数组合排名')
+plt.ylabel('MSE')
+plt.title('网格搜索Top20结果')
+plt.grid(True)
+plt.savefig(os.path.join(output_dir, "Ridge_网格搜索结果.png"), dpi=300, bbox_inches='tight')
+plt.close()
+print("网格搜索结果图绘制完成!")
+
+# 评估模型
+print("\n正在评估模型性能...")
+train_metrics = evaluate_model(y_train, y_train_pred, "训练集")
+val_metrics = evaluate_model(y_val, y_val_pred, "验证集")
+test_metrics = evaluate_model(y_test, y_test_pred, "测试集")
+
+# 将评估指标保存到Excel
+metrics_df = pd.DataFrame({
+    "指标": ["R²", "MAE", "MSE", "RMSE"],
+    "训练集": [train_metrics["R²"], train_metrics["MAE"], train_metrics["MSE"], train_metrics["RMSE"]],
+    "验证集": [val_metrics["R²"], val_metrics["MAE"], val_metrics["MSE"], val_metrics["RMSE"]],
+    "测试集": [test_metrics["R²"], test_metrics["MAE"], test_metrics["MSE"], test_metrics["RMSE"]]
+})
+metrics_df.to_excel(os.path.join(output_dir, "Ridge_评估指标.xlsx"), index=False)
+print("评估指标已保存!")
+
+
+# 绘制实际值与预测值的对比图
+def plot_actual_vs_predicted(y_true, y_pred, title, filename):
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_true, y_pred, alpha=0.5)
+
+    # 添加对角线（理想预测线）
+    min_val = min(min(y_true), min(y_pred))
+    max_val = max(max(y_true), max(y_pred))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--')
+
+    plt.xlabel('实际值')
+    plt.ylabel('预测值')
+    plt.title(title)
+    plt.grid(True)
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+# 绘制实际值与预测值的对比图
+print("\n正在绘制实际值与预测值对比图...")
+plot_actual_vs_predicted(y_train, y_train_pred, "训练集：实际值 vs 预测值",
+                         os.path.join(output_dir, "Ridge_训练集_实际vs预测.png"))
+plot_actual_vs_predicted(y_val, y_val_pred, "验证集：实际值 vs 预测值",
+                         os.path.join(output_dir, "Ridge_验证集_实际vs预测.png"))
+plot_actual_vs_predicted(y_test, y_test_pred, "测试集：实际值 vs 预测值",
+                         os.path.join(output_dir, "Ridge_测试集_实际vs预测.png"))
+print("对比图绘制完成!")
+
+
+# 保存预测结果
+def save_predictions(X_data, y_true, y_pred, filename, dataset_name):
+    # 创建结果DataFrame
+    result_df = pd.DataFrame(X_data, columns=features)
+    result_df[target] = y_true.values if hasattr(y_true, 'values') else y_true
+    result_df['预测值'] = y_pred
+    result_df['残差'] = result_df[target] - result_df['预测值']
+    result_df['数据集'] = dataset_name
+    # 保存到Excel
+    result_df.to_excel(filename, index=False)
+
+
+# 保存预测结果
+print("\n正在保存预测结果...")
+save_predictions(X_train, y_train, y_train_pred, os.path.join(output_dir, "Ridge_训练集_预测结果.xlsx"), "训练集")
+save_predictions(X_val, y_val, y_val_pred, os.path.join(output_dir, "Ridge_验证集_预测结果.xlsx"), "验证集")
+save_predictions(X_test, y_test, y_test_pred, os.path.join(output_dir, "Ridge_测试集_预测结果.xlsx"), "测试集")
+
+# 保存完整的预测结果（所有数据集合并）
+all_X = np.vstack([X_train, X_val, X_test])
+all_y_true = np.concatenate([y_train.values, y_val.values, y_test.values])
+all_y_pred = np.concatenate([y_train_pred, y_val_pred, y_test_pred])
+all_dataset_labels = ['训练集'] * len(y_train) + ['验证集'] * len(y_val) + ['测试集'] * len(y_test)
+
+complete_results = pd.DataFrame(all_X, columns=features)
+complete_results[target] = all_y_true
+complete_results['预测值'] = all_y_pred
+complete_results['残差'] = complete_results[target] - complete_results['预测值']
+complete_results['数据集'] = all_dataset_labels
+complete_results.to_excel(os.path.join(output_dir, "Ridge_完整预测结果.xlsx"), index=False)
+print("预测结果保存完成!")
+
+# 特征重要性分析
+print("\n正在进行特征重要性分析...")
+# Ridge回归的系数可以作为特征重要性的指标
+feature_importance = np.abs(final_model.coef_)
+feature_names = features
+
+# 创建特征重要性DataFrame
+feature_importance_df = pd.DataFrame({
+    '特征': feature_names,
+    '重要性': feature_importance
+})
+feature_importance_df = feature_importance_df.sort_values('重要性', ascending=False)
+
+# 保存特征重要性到Excel
+feature_importance_df.to_excel(os.path.join(output_dir, "Ridge_特征重要性.xlsx"), index=False)
+
+# 绘制特征重要性图
+plt.figure(figsize=(10, 6))
+plt.barh(feature_importance_df['特征'], feature_importance_df['重要性'])
+plt.xlabel('重要性')
+plt.title('Ridge回归 特征重要性')
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "Ridge_特征重要性.png"), dpi=300, bbox_inches='tight')
+plt.close()
+print("特征重要性分析完成!")
+
+# 保存调参结果
+print("\n正在保存调参结果...")
+with open(os.path.join(output_dir, "Ridge_调参结果.txt"), "w", encoding="utf-8") as f:
+    f.write("Ridge回归模型网格搜索结果:\n\n")
+    f.write("数据集信息:\n")
+    f.write(f"训练集: {len(y_train)}条\n")
+    f.write(f"验证集: {len(y_val)}条\n")
+    f.write(f"测试集: {len(y_test)}条\n")
+    f.write(f"总计: {len(y_train) + len(y_val) + len(y_test)}条\n\n")
+    f.write("最佳参数:\n")
+    for param, value in grid_search.best_params_.items():
+        f.write(f"{param}: {value}\n")
+    f.write(f"最佳MSE: {-grid_search.best_score_:.4f}\n")
+    f.write(f"最佳RMSE: {np.sqrt(-grid_search.best_score_):.4f}\n")
+print("调参结果保存完成!")
+
+# 绘制损失曲线图（对于Ridge回归，我们没有迭代过程的损失曲线，但可以绘制不同alpha值的性能曲线）
+print("\n正在绘制alpha参数影响曲线...")
+
+# 提取不同alpha值的结果
+alpha_results = grid_results[grid_results['param_solver'] == best_solver].sort_values('param_alpha')
+alpha_values = alpha_results['param_alpha'].values
+mse_scores = -alpha_results['mean_test_score'].values
+
+# 绘制alpha参数影响曲线
+plt.figure(figsize=(10, 6))
+plt.semilogx(alpha_values, mse_scores, 'bo-')
+plt.xlabel('Alpha (正则化强度)')
+plt.ylabel('MSE')
+plt.title('Ridge回归 - Alpha参数对模型性能的影响')
+plt.grid(True)
+plt.savefig(os.path.join(output_dir, "Ridge_alpha参数影响.png"), dpi=300, bbox_inches='tight')
+plt.close()
+print("alpha参数影响曲线绘制完成!")
+
+# 保存数据集划分信息
+print("\n正在保存数据集划分信息...")
+split_info = pd.DataFrame({
+    '数据集': ['训练集', '验证集', '测试集', '总计'],
+    '样本数量': [len(y_train), len(y_val), len(y_test), len(y_train) + len(y_val) + len(y_test)],
+    '比例': [len(y_train) / (len(y_train) + len(y_val) + len(y_test)),
+             len(y_val) / (len(y_train) + len(y_val) + len(y_test)),
+             len(y_test) / (len(y_train) + len(y_val) + len(y_test)),
+             1.0]
+})
+split_info.to_excel(os.path.join(output_dir, "Ridge_数据集划分信息.xlsx"), index=False)
+print("数据集划分信息保存完成!")
+
+print("\n所有结果已保存到目录: " + output_dir)
+print("网格搜索阶段完成!")
+
+# ==================== Optuna精调阶段 ====================
+print("\n" + "=" * 60)
+print("开始Optuna精调阶段...")
+print("=" * 60)
+
+# 基于网格搜索结果进行精调
+grid_best_alpha = 1.0
+grid_best_solver = 'lsqr'
+
+print(f"网格搜索最佳参数: alpha={grid_best_alpha}, solver='{grid_best_solver}'")
+print("基于此结果进行精调...")
+
+# 定义五折交叉验证
+optuna_kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+
+# 定义Optuna目标函数
+def objective(trial):
+    # 基于网格搜索结果，在最佳alpha附近进行精调
+    # alpha在最佳值附近的范围内搜索
+    alpha = trial.suggest_float('alpha', 0.1, 10.0, log=True)
+
+    # solver保持最佳选择，但也可以在相关solver中选择
+    solver = trial.suggest_categorical('solver', ['lsqr', 'cholesky', 'sag', 'saga'])
+
+    # 添加其他可调参数
+    fit_intercept = trial.suggest_categorical('fit_intercept', [True, False])
+    max_iter = trial.suggest_int('max_iter', 1000, 5000) if solver in ['sag', 'saga'] else None
+    tol = trial.suggest_float('tol', 1e-6, 1e-3, log=True) if solver in ['sag', 'saga'] else 1e-4
+
+    # 创建模型参数字典
+    model_params = {
+        'alpha': alpha,
+        'solver': solver,
+        'fit_intercept': fit_intercept,
+        'random_state': 42
+    }
+
+    # 只有当solver支持时才添加max_iter和tol参数
+    if solver in ['sag', 'saga']:
+        model_params['max_iter'] = max_iter
+        model_params['tol'] = tol
+
+    # 五折交叉验证
+    cv_scores = []
+    for train_idx, val_idx in optuna_kf.split(X_train_val):
+        X_cv_train, X_cv_val = X_train_val[train_idx], X_train_val[val_idx]
+        y_cv_train, y_cv_val = y_train_val[train_idx], y_train_val[val_idx]
+
+        # 创建并训练模型
+        model = Ridge(**model_params)
+        model.fit(X_cv_train, y_cv_train)
+
+        # 预测并计算MSE
+        y_cv_pred = model.predict(X_cv_val)
+        mse = mean_squared_error(y_cv_val, y_cv_pred)
+        cv_scores.append(mse)
+
+    # 返回平均MSE
+    return np.mean(cv_scores)
+
+
+# 创建Optuna研究
+print("\n创建Optuna研究...")
+study = optuna.create_study(
+    direction='minimize',
+    sampler=TPESampler(seed=42)
+)
+
+# 执行优化
+print("开始Optuna优化...")
+optuna_start_time = time.time()
+
+
+# 使用回调函数显示进度
+def optuna_callback(study, trial):
+    if trial.number % 20 == 0:
+        print(f"Trial {trial.number}: Best MSE = {study.best_value:.6f}")
+
+
+study.optimize(objective, n_trials=200, callbacks=[optuna_callback])
+
+optuna_end_time = time.time()
+print(f"\nOptuna优化完成! 耗时: {optuna_end_time - optuna_start_time:.2f}秒")
+
+# 输出最佳参数
+print("\nOptuna最佳参数:")
+for key, value in study.best_params.items():
+    print(f"{key}: {value}")
+print(f"最佳MSE: {study.best_value:.6f}")
+print(f"最佳RMSE: {np.sqrt(study.best_value):.6f}")
+
+# 保存Optuna优化结果
+optuna_results = []
+for trial in study.trials:
+    trial_data = {
+        'trial_number': trial.number,
+        'value': trial.value,
+        'state': trial.state.name
+    }
+    trial_data.update(trial.params)
+    optuna_results.append(trial_data)
+
+optuna_df = pd.DataFrame(optuna_results)
+optuna_df.to_excel(os.path.join(output_dir, "Ridge_Optuna优化结果.xlsx"), index=False)
+
+# 绘制Optuna优化过程
+print("\n正在绘制Optuna优化过程图...")
+
+# 优化历史
+plt.figure(figsize=(12, 8))
+
+# 子图1: 优化历史
+plt.subplot(2, 2, 1)
+trials = [t for t in study.trials if t.value is not None]
+trial_numbers = [t.number for t in trials]
+trial_values = [t.value for t in trials]
+best_values = [min(trial_values[:i + 1]) for i in range(len(trial_values))]
+
+plt.plot(trial_numbers, trial_values, 'b.', alpha=0.6, label='Trial MSE')
+plt.plot(trial_numbers, best_values, 'r-', linewidth=2, label='Best MSE')
+plt.xlabel('Trial Number')
+plt.ylabel('MSE')
+plt.title('Optuna优化历史')
+plt.legend()
+plt.grid(True)
+
+# 子图2: 参数重要性（如果有足够的试验）
+plt.subplot(2, 2, 2)
+if len(study.trials) >= 10:
+    try:
+        importance = optuna.importance.get_param_importances(study)
+        params = list(importance.keys())
+        values = list(importance.values())
+
+        plt.barh(params, values)
+        plt.xlabel('重要性')
+        plt.title('参数重要性')
+    except:
+        plt.text(0.5, 0.5, '参数重要性计算失败', ha='center', va='center', transform=plt.gca().transAxes)
+else:
+    plt.text(0.5, 0.5, '试验次数不足', ha='center', va='center', transform=plt.gca().transAxes)
+
+# 子图3: Alpha参数分布
+plt.subplot(2, 2, 3)
+alpha_values = [t.params.get('alpha') for t in trials if 'alpha' in t.params]
+if alpha_values:
+    plt.hist(alpha_values, bins=20, alpha=0.7, edgecolor='black')
+    plt.xlabel('Alpha值')
+    plt.ylabel('频次')
+    plt.title('Alpha参数分布')
+    plt.axvline(study.best_params['alpha'], color='red', linestyle='--',
+                label=f'最佳值: {study.best_params["alpha"]:.4f}')
+    plt.legend()
+
+# 子图4: MSE分布
+plt.subplot(2, 2, 4)
+plt.hist(trial_values, bins=20, alpha=0.7, edgecolor='black')
+plt.xlabel('MSE')
+plt.ylabel('频次')
+plt.title('MSE分布')
+plt.axvline(study.best_value, color='red', linestyle='--', label=f'最佳值: {study.best_value:.6f}')
+plt.legend()
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "Ridge_Optuna优化过程.png"), dpi=300, bbox_inches='tight')
+plt.close()
+print("Optuna优化过程图绘制完成!")
+
+# 使用Optuna最佳参数训练最终模型
+print("\n使用Optuna最佳参数训练最终模型...")
+optuna_best_params = study.best_params.copy()
+
+# 处理参数
+final_params = {
+    'alpha': optuna_best_params['alpha'],
+    'solver': optuna_best_params['solver'],
+    'fit_intercept': optuna_best_params['fit_intercept'],
+    'random_state': 42
+}
+
+# 只有当solver支持时才添加max_iter和tol参数
+if optuna_best_params['solver'] in ['sag', 'saga']:
+    if 'max_iter' in optuna_best_params:
+        final_params['max_iter'] = optuna_best_params['max_iter']
+    if 'tol' in optuna_best_params:
+        final_params['tol'] = optuna_best_params['tol']
+
+optuna_model = Ridge(**final_params)
+optuna_model.fit(X_train_scaled, y_train)
+print("Optuna最终模型训练完成!")
+
+# 保存Optuna模型
+joblib.dump(optuna_model, os.path.join(output_dir, "Ridge_Optuna最终模型.pkl"))
+
+# 使用Optuna模型进行预测
+print("\n正在使用Optuna模型进行预测...")
+y_train_pred_optuna = optuna_model.predict(X_train_scaled)
+y_val_pred_optuna = optuna_model.predict(X_val_scaled)
+y_test_pred_optuna = optuna_model.predict(X_test_scaled)
+print("Optuna模型预测完成!")
+
+# 评估Optuna模型
+print("\n正在评估Optuna模型性能...")
+train_metrics_optuna = evaluate_model(y_train, y_train_pred_optuna, "Optuna训练集")
+val_metrics_optuna = evaluate_model(y_val, y_val_pred_optuna, "Optuna验证集")
+test_metrics_optuna = evaluate_model(y_test, y_test_pred_optuna, "Optuna测试集")
+
+# 保存Optuna评估指标
+optuna_metrics_df = pd.DataFrame({
+    "指标": ["R²", "MAE", "MSE", "RMSE"],
+    "训练集": [train_metrics_optuna["R²"], train_metrics_optuna["MAE"], train_metrics_optuna["MSE"],
+               train_metrics_optuna["RMSE"]],
+    "验证集": [val_metrics_optuna["R²"], val_metrics_optuna["MAE"], val_metrics_optuna["MSE"],
+               val_metrics_optuna["RMSE"]],
+    "测试集": [test_metrics_optuna["R²"], test_metrics_optuna["MAE"], test_metrics_optuna["MSE"],
+               test_metrics_optuna["RMSE"]]
+})
+optuna_metrics_df.to_excel(os.path.join(output_dir, "Ridge_Optuna评估指标.xlsx"), index=False)
+
+# 绘制Optuna模型的实际值与预测值对比图
+print("\n正在绘制Optuna模型对比图...")
+plot_actual_vs_predicted(y_train, y_train_pred_optuna, "Optuna训练集：实际值 vs 预测值",
+                         os.path.join(output_dir, "Ridge_Optuna训练集_实际vs预测.png"))
+plot_actual_vs_predicted(y_val, y_val_pred_optuna, "Optuna验证集：实际值 vs 预测值",
+                         os.path.join(output_dir, "Ridge_Optuna验证集_实际vs预测.png"))
+plot_actual_vs_predicted(y_test, y_test_pred_optuna, "Optuna测试集：实际值 vs 预测值",
+                         os.path.join(output_dir, "Ridge_Optuna测试集_实际vs预测.png"))
+
+# 保存Optuna预测结果
+save_predictions(X_train, y_train, y_train_pred_optuna, os.path.join(output_dir, "Ridge_Optuna训练集_预测结果.xlsx"),
+                 "Optuna训练集")
+save_predictions(X_val, y_val, y_val_pred_optuna, os.path.join(output_dir, "Ridge_Optuna验证集_预测结果.xlsx"),
+                 "Optuna验证集")
+save_predictions(X_test, y_test, y_test_pred_optuna, os.path.join(output_dir, "Ridge_Optuna测试集_预测结果.xlsx"),
+                 "Optuna测试集")
+
+# Optuna特征重要性分析
+optuna_feature_importance = np.abs(optuna_model.coef_)
+optuna_feature_importance_df = pd.DataFrame({
+    '特征': feature_names,
+    '重要性': optuna_feature_importance
+})
+optuna_feature_importance_df = optuna_feature_importance_df.sort_values('重要性', ascending=False)
+optuna_feature_importance_df.to_excel(os.path.join(output_dir, "Ridge_Optuna特征重要性.xlsx"), index=False)
+
+# 绘制Optuna特征重要性图
+plt.figure(figsize=(10, 6))
+plt.barh(optuna_feature_importance_df['特征'], optuna_feature_importance_df['重要性'])
+plt.xlabel('重要性')
+plt.title('Ridge回归 Optuna特征重要性')
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "Ridge_Optuna特征重要性.png"), dpi=300, bbox_inches='tight')
+plt.close()
+
+# 保存Optuna调参结果
+with open(os.path.join(output_dir, "Ridge_Optuna调参结果.txt"), "w", encoding="utf-8") as f:
+    f.write("Ridge回归模型Optuna精调结果:\n\n")
+    f.write("数据集信息:\n")
+    f.write(f"训练集: {len(y_train)}条\n")
+    f.write(f"验证集: {len(y_val)}条\n")
+    f.write(f"测试集: {len(y_test)}条\n")
+    f.write(f"总计: {len(y_train) + len(y_val) + len(y_test)}条\n\n")
+    f.write("交叉验证设置: 5折交叉验证\n")
+    f.write(f"优化试验次数: 200次\n")
+    f.write(f"优化耗时: {optuna_end_time - optuna_start_time:.2f}秒\n\n")
+    f.write("最佳参数:\n")
+    for param, value in study.best_params.items():
+        f.write(f"{param}: {value}\n")
+    f.write(f"最佳MSE: {study.best_value:.6f}\n")
+    f.write(f"最佳RMSE: {np.sqrt(study.best_value):.6f}\n")
+
+# 比较网格搜索和Optuna结果
+print("\n正在比较网格搜索和Optuna结果...")
+comparison_df = pd.DataFrame({
+    "方法": ["网格搜索", "Optuna精调"],
+    "最佳MSE": [-grid_search.best_score_, study.best_value],
+    "最佳RMSE": [np.sqrt(-grid_search.best_score_), np.sqrt(study.best_value)],
+    "测试集R²": [test_metrics["R²"], test_metrics_optuna["R²"]],
+    "测试集MAE": [test_metrics["MAE"], test_metrics_optuna["MAE"]],
+    "测试集MSE": [test_metrics["MSE"], test_metrics_optuna["MSE"]],
+    "测试集RMSE": [test_metrics["RMSE"], test_metrics_optuna["RMSE"]]
+})
+comparison_df.to_excel(os.path.join(output_dir, "Ridge_方法比较结果.xlsx"), index=False)
+
+# 输出比较结果
+print("\n" + "=" * 60)
+print("网格搜索 vs Optuna精调 结果比较:")
+print("=" * 60)
+print(f"网格搜索最佳MSE: {-grid_search.best_score_:.6f}")
+print(f"Optuna精调最佳MSE: {study.best_value:.6f}")
+print(f"MSE改进: {(-grid_search.best_score_ - study.best_value):.6f}")
+print(f"改进百分比: {((-grid_search.best_score_ - study.best_value) / (-grid_search.best_score_) * 100):.2f}%")
+print("\n测试集性能比较:")
+print(f"网格搜索测试集R²: {test_metrics['R²']:.6f}")
+print(f"Optuna精调测试集R²: {test_metrics_optuna['R²']:.6f}")
+print(f"R²改进: {(test_metrics_optuna['R²'] - test_metrics['R²']):.6f}")
+
+print("\n" + "=" * 60)
+print("所有结果已保存到目录: " + output_dir)
+print("Ridge回归模型完整训练与评估完成!")
+print("=" * 60)
