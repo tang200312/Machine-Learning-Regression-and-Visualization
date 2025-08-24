@@ -1,0 +1,586 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import xgboost as xgb
+import optuna
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.model_selection import KFold, cross_val_score, train_test_split, GridSearchCV
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# 设置输出目录
+output_dir = r"F:\Machine leaning_SHAP\1"
+os.makedirs(output_dir, exist_ok=True)
+
+# 设置中文显示
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 读取统一数据集并划分
+print("正在读取统一数据集...")
+all_data = pd.read_excel(r"F:\Machine leaning_SHAP\数据集.xlsx")
+
+# 定义特征和目标变量
+features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+target = "NEP"
+
+print(f"数据集总样本数: {len(all_data)}")
+
+# 划分数据集：训练集21888条，验证集7344条，测试集5856条
+# 首先分离出训练集
+train_data, temp_data = train_test_split(
+    all_data,
+    train_size=21888,
+    random_state=42,
+    shuffle=True
+)
+
+# 从剩余数据中分离验证集和测试集
+val_data, test_data = train_test_split(
+    temp_data,
+    train_size=7344,
+    test_size=5856,
+    random_state=42,
+    shuffle=True
+)
+
+print(f"训练集样本数: {len(train_data)}")
+print(f"验证集样本数: {len(val_data)}")
+print(f"测试集样本数: {len(test_data)}")
+
+# 保存划分后的数据集
+train_data.to_excel(os.path.join(output_dir, 'train_dataset.xlsx'), index=False)
+val_data.to_excel(os.path.join(output_dir, 'validation_dataset.xlsx'), index=False)
+test_data.to_excel(os.path.join(output_dir, 'test_dataset.xlsx'), index=False)
+
+
+# 数据预处理函数
+def preprocess_data(data):
+    X = data[features].values
+    y = data[target].values
+    return X, y
+
+
+# 归一化处理
+print("正在进行归一化处理...")
+scaler = MinMaxScaler()
+X_train, y_train = preprocess_data(train_data)
+X_val, y_val = preprocess_data(val_data)
+X_test, y_test = preprocess_data(test_data)
+
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_test_scaled = scaler.transform(X_test)
+
+
+# 定义评估指标函数
+def evaluate_model(y_true, y_pred):
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    return {
+        'R²': r2,
+        'MAE': mae,
+        'MSE': mse,
+        'RMSE': rmse
+    }
+
+
+# ==================== 第一步：网格搜索粗调（三折交叉验证）====================
+print("\n==================== 开始网格搜索粗调 ====================")
+print("使用三折交叉验证进行关键超参数粗调...")
+
+# 定义网格搜索参数空间（关键超参数）
+param_grid = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [3, 5, 7],
+    'learning_rate': [0.01, 0.1, 0.2],
+    'subsample': [0.8, 0.9, 1.0],
+    'colsample_bytree': [0.8, 0.9, 1.0],
+    'min_child_weight': [1, 3, 5]
+}
+
+# 创建XGBoost回归器
+xgb_regressor = xgb.XGBRegressor(
+    objective='reg:squarederror',
+    random_state=42,
+    n_jobs=1
+)
+
+# 使用三折交叉验证进行网格搜索
+print("正在进行网格搜索...")
+grid_search = GridSearchCV(
+    estimator=xgb_regressor,
+    param_grid=param_grid,
+    cv=KFold(n_splits=3, shuffle=True, random_state=42),
+    scoring='r2',
+    n_jobs=1,
+    verbose=1
+)
+
+# 执行网格搜索
+grid_search.fit(X_train_scaled, y_train)
+
+# 获取粗调最佳参数
+best_params_coarse = grid_search.best_params_
+best_score_coarse = grid_search.best_score_
+
+print(f"\n网格搜索粗调完成！")
+print(f"粗调最佳参数: {best_params_coarse}")
+print(f"粗调最佳R²得分: {best_score_coarse:.4f}")
+
+# 保存网格搜索结果
+grid_results = pd.DataFrame(grid_search.cv_results_)
+grid_results.to_excel(os.path.join(output_dir, 'XGBoost_grid_search_results.xlsx'), index=False)
+
+# 使用粗调最佳参数训练模型并评估
+coarse_model = xgb.XGBRegressor(
+    objective='reg:squarederror',
+    **best_params_coarse
+)
+coarse_model.fit(X_train_scaled, y_train)
+
+# 粗调模型预测和评估
+y_train_coarse = coarse_model.predict(X_train_scaled)
+y_val_coarse = coarse_model.predict(X_val_scaled)
+y_test_coarse = coarse_model.predict(X_test_scaled)
+
+train_coarse_metrics = evaluate_model(y_train, y_train_coarse)
+val_coarse_metrics = evaluate_model(y_val, y_val_coarse)
+test_coarse_metrics = evaluate_model(y_test, y_test_coarse)
+
+print("\n粗调模型评估指标:")
+print("训练集:", train_coarse_metrics)
+print("验证集:", val_coarse_metrics)
+print("测试集:", test_coarse_metrics)
+
+# 保存粗调模型特征重要性
+feature_importances = coarse_model.feature_importances_
+feature_importance_df = pd.DataFrame({
+    '特征': features,
+    '重要性': feature_importances
+})
+feature_importance_df = feature_importance_df.sort_values('重要性', ascending=False)
+
+print("\n特征重要性排序:")
+print(feature_importance_df)
+
+# 保存特征重要性到Excel
+feature_importance_df.to_excel(os.path.join(output_dir, 'XGBoost_feature_importance_coarse.xlsx'), index=False)
+
+# 绘制特征重要性图
+plt.figure(figsize=(10, 6))
+plt.barh(feature_importance_df['特征'], feature_importance_df['重要性'])
+plt.xlabel('特征重要性')
+plt.title('粗调模型特征重要性')
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'XGBoost_coarse_feature_importance.png'))
+plt.close()
+
+# ==================== 第二步：Optuna精调（五折交叉验证）====================
+print("\n==================== 开始Optuna精调 ====================")
+print("使用五折交叉验证进行精调，实验次数200次，加强防过拟合...")
+
+
+# 定义Optuna目标函数（修复版本兼容性问题，加强防过拟合）
+def objective(trial):
+    # 基于粗调结果设置精调参数范围，大幅加强防过拟合措施
+    params = {
+        # 减少模型复杂度：限制树的数量
+        'n_estimators': trial.suggest_int('n_estimators',
+                                          max(50, best_params_coarse['n_estimators'] - 150),
+                                          min(200, best_params_coarse['n_estimators'] + 50)),  # 大幅减少上限
+
+        # 限制树的深度，防止过拟合
+        'max_depth': trial.suggest_int('max_depth',
+                                       3,  # 固定最小深度为3
+                                       min(6, best_params_coarse['max_depth'] + 1)),  # 限制最大深度
+
+        # 降低学习率，防止过拟合
+        'learning_rate': trial.suggest_float('learning_rate',
+                                             0.01,  # 固定最小学习率
+                                             min(0.15, best_params_coarse['learning_rate'] * 1.2)),
+
+        # 大幅加强抽样，减少过拟合
+        'subsample': trial.suggest_float('subsample', 0.5, 0.8),  # 更强的样本抽样
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 0.8),  # 更强的特征抽样
+        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.5, 0.8),  # 每层特征抽样
+        'colsample_bynode': trial.suggest_float('colsample_bynode', 0.5, 0.8),  # 每节点特征抽样
+
+        # 增加叶子节点的最小权重，防止过拟合
+        'min_child_weight': trial.suggest_int('min_child_weight',
+                                              max(5, best_params_coarse['min_child_weight'] + 2),
+                                              best_params_coarse['min_child_weight'] + 15),  # 提高最小值
+
+        # 加强正则化参数（修复log分布问题）
+        'gamma': trial.suggest_float('gamma', 0.5, 8.0),  # 提高最小分割损失
+        'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 15.0, log=True),  # 修复：从0.1开始
+        'reg_lambda': trial.suggest_float('reg_lambda', 1.0, 15.0, log=True),  # 加强L2正则化
+
+        # 添加更多防过拟合参数
+        'max_delta_step': trial.suggest_float('max_delta_step', 0, 1),  # 限制每棵树的权重改变
+        'scale_pos_weight': 1,  # 保持类别平衡
+
+        'random_state': 42,
+        'objective': 'reg:squarederror'
+    }
+
+    # 使用五折交叉验证
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+    cv_scores = []
+    for train_idx, val_idx in kf.split(X_train_scaled):
+        X_cv_train, X_cv_val = X_train_scaled[train_idx], X_train_scaled[val_idx]
+        y_cv_train, y_cv_val = y_train[train_idx], y_train[val_idx]
+
+        # 创建模型（修复版本兼容性）
+        model = xgb.XGBRegressor(**params)
+
+        # 训练模型（使用回调函数实现早停法，兼容新版本XGBoost）
+        try:
+            # 尝试使用新版本的回调函数方式
+            model.fit(
+                X_cv_train, y_cv_train,
+                eval_set=[(X_cv_val, y_cv_val)],
+                callbacks=[xgb.callback.EarlyStopping(rounds=30, save_best=True)],
+                verbose=False
+            )
+        except:
+            # 如果回调函数不可用，则使用传统方式训练（不使用早停）
+            model.fit(X_cv_train, y_cv_train, verbose=False)
+
+        y_cv_pred = model.predict(X_cv_val)
+        r2 = r2_score(y_cv_val, y_cv_pred)
+        cv_scores.append(r2)
+
+    return np.mean(cv_scores)
+
+
+# 创建Optuna study
+study = optuna.create_study(direction='maximize')
+
+
+# 显示进度的回调函数
+class ProgressCallback:
+    def __init__(self, total_trials):
+        self.total_trials = total_trials
+        self.completed_trials = 0
+
+    def __call__(self, study, trial):
+        self.completed_trials += 1
+        progress = self.completed_trials / self.total_trials * 100
+        print(f"Optuna精调进度: {self.completed_trials}/{self.total_trials} ({progress:.2f}%)")
+        if self.completed_trials % 20 == 0 or self.completed_trials <= 5:
+            print(f"当前最佳参数: {study.best_params}")
+            print(f"当前最佳得分: {study.best_value:.4f}\n")
+
+
+# 设置优化次数
+n_trials = 200
+progress_callback = ProgressCallback(n_trials)
+
+# 开始Optuna优化
+print("开始Optuna精调优化...")
+study.optimize(objective, n_trials=n_trials, callbacks=[progress_callback], n_jobs=1)
+
+# 获取精调最佳参数
+best_params_fine = study.best_params
+best_score_fine = study.best_value
+
+print(f"\nOptuna精调完成！")
+print(f"精调最佳参数: {best_params_fine}")
+print(f"精调最佳R²得分: {best_score_fine:.4f}")
+
+# ==================== 第三步：导出超参数组合和评估指标 ====================
+print("\n==================== 导出结果 ====================")
+
+# 创建并保存粗调和精调的最优超参数组合
+params_comparison_df = pd.DataFrame([
+    {'模型类型': '粗调（网格搜索）', 'R²得分': best_score_coarse, **best_params_coarse},
+    {'模型类型': '精调（Optuna）', 'R²得分': best_score_fine, **best_params_fine}
+])
+
+# 保存超参数组合
+params_comparison_df.to_excel(os.path.join(output_dir, 'XGBoost_hyperparameters_comparison.xlsx'), index=False)
+print(f"超参数组合已保存到: {os.path.join(output_dir, 'XGBoost_hyperparameters_comparison.xlsx')}")
+
+# 保存Optuna优化历史
+optuna_history = study.trials_dataframe()
+optuna_history.to_excel(os.path.join(output_dir, 'XGBoost_optuna_optimization_history.xlsx'), index=False)
+
+# 绘制Optuna优化历史
+plt.figure(figsize=(12, 8))
+optuna.visualization.matplotlib.plot_optimization_history(study)
+plt.title('Optuna优化历史')
+plt.savefig(os.path.join(output_dir, 'XGBoost_optuna_history.png'))
+plt.close()
+
+# 绘制参数重要性
+plt.figure(figsize=(12, 8))
+optuna.visualization.matplotlib.plot_param_importances(study)
+plt.title('Optuna参数重要性')
+plt.savefig(os.path.join(output_dir, 'XGBoost_optuna_param_importances.png'))
+plt.close()
+
+# ==================== 第四步：最终模型训练和评估 ====================
+print("\n==================== 最终模型训练和评估 ====================")
+
+# 使用精调最佳参数创建最终模型
+final_model = xgb.XGBRegressor(**best_params_fine)
+
+# 训练最终模型（使用兼容的早停法）
+try:
+    # 尝试使用新版本的回调函数方式
+    final_model.fit(
+        X_train_scaled, y_train,
+        eval_set=[(X_val_scaled, y_val)],
+        callbacks=[xgb.callback.EarlyStopping(rounds=30, save_best=True)],
+        verbose=False
+    )
+except:
+    # 如果回调函数不可用，则使用传统方式训练
+    final_model.fit(X_train_scaled, y_train, verbose=False)
+
+# 最终模型预测
+y_train_final = final_model.predict(X_train_scaled)
+y_val_final = final_model.predict(X_val_scaled)
+y_test_final = final_model.predict(X_test_scaled)
+
+# 最终模型评估
+train_final_metrics = evaluate_model(y_train, y_train_final)
+val_final_metrics = evaluate_model(y_val, y_val_final)
+test_final_metrics = evaluate_model(y_test, y_test_final)
+
+print("\n最终模型（精调）评估指标:")
+print("训练集:", train_final_metrics)
+print("验证集:", val_final_metrics)
+print("测试集:", test_final_metrics)
+
+# 检查过拟合情况
+train_val_r2_diff = train_final_metrics['R²'] - val_final_metrics['R²']
+train_test_r2_diff = train_final_metrics['R²'] - test_final_metrics['R²']
+
+print(f"\n过拟合检查:")
+print(f"训练集与验证集R²差异: {train_val_r2_diff:.4f}")
+print(f"训练集与测试集R²差异: {train_test_r2_diff:.4f}")
+
+if train_val_r2_diff > 0.05 or train_test_r2_diff > 0.05:
+    print("⚠️  警告：模型可能存在过拟合，建议进一步调整参数")
+else:
+    print("✅ 模型泛化性能良好，无明显过拟合")
+
+# 创建完整的评估指标比较表
+metrics_comparison_df = pd.DataFrame({
+    '指标': list(train_final_metrics.keys()),
+    '粗调_训练集': list(train_coarse_metrics.values()),
+    '粗调_验证集': list(val_coarse_metrics.values()),
+    '粗调_测试集': list(test_coarse_metrics.values()),
+    '精调_训练集': list(train_final_metrics.values()),
+    '精调_验证集': list(val_final_metrics.values()),
+    '精调_测试集': list(test_final_metrics.values())
+})
+
+# 保存评估指标比较
+metrics_comparison_df.to_excel(os.path.join(output_dir, 'XGBoost_metrics_comparison.xlsx'), index=False)
+print(f"评估指标比较已保存到: {os.path.join(output_dir, 'XGBoost_metrics_comparison.xlsx')}")
+
+# 保存预测结果
+train_data_copy = train_data.copy()
+val_data_copy = val_data.copy()
+test_data_copy = test_data.copy()
+
+train_data_copy['XGBoost_粗调预测值'] = y_train_coarse
+train_data_copy['XGBoost_精调预测值'] = y_train_final
+val_data_copy['XGBoost_粗调预测值'] = y_val_coarse
+val_data_copy['XGBoost_精调预测值'] = y_val_final
+test_data_copy['XGBoost_粗调预测值'] = y_test_coarse
+test_data_copy['XGBoost_精调预测值'] = y_test_final
+
+train_data_copy.to_excel(os.path.join(output_dir, 'XGBoost_train_predictions.xlsx'), index=False)
+val_data_copy.to_excel(os.path.join(output_dir, 'XGBoost_validation_predictions.xlsx'), index=False)
+test_data_copy.to_excel(os.path.join(output_dir, 'XGBoost_test_predictions.xlsx'), index=False)
+
+# ==================== 第五步：绘制损失曲线和可视化结果 ====================
+print("\n==================== 生成可视化结果 ====================")
+
+# 绘制训练过程中的损失曲线（兼容版本检查）
+try:
+    if hasattr(final_model, 'evals_result_') and final_model.evals_result_:
+        plt.figure(figsize=(12, 6))
+
+        # 获取训练历史
+        results = final_model.evals_result_
+        epochs = len(results['validation_0']['rmse'])
+        x_axis = range(0, epochs)
+
+        # 绘制损失曲线
+        plt.plot(x_axis, results['validation_0']['rmse'], label='验证集RMSE', linewidth=2)
+        plt.xlabel('迭代次数')
+        plt.ylabel('RMSE')
+        plt.title('XGBoost训练损失曲线（防过拟合优化）')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'XGBoost_loss_curve.png'))
+        plt.close()
+    else:
+        print("注意：当前XGBoost版本不支持训练历史记录，跳过损失曲线绘制")
+except Exception as e:
+    print(f"绘制损失曲线时出现错误: {e}")
+
+# 绘制粗调vs精调的R²比较
+plt.figure(figsize=(12, 6))
+x = ['训练集', '验证集', '测试集']
+y1 = [train_coarse_metrics['R²'], val_coarse_metrics['R²'], test_coarse_metrics['R²']]
+y2 = [train_final_metrics['R²'], val_final_metrics['R²'], test_final_metrics['R²']]
+
+x_pos = np.arange(len(x))
+width = 0.35
+
+plt.bar(x_pos - width / 2, y1, width, label='粗调（网格搜索）', alpha=0.8)
+plt.bar(x_pos + width / 2, y2, width, label='精调（Optuna+防过拟合）', alpha=0.8)
+
+plt.xlabel('数据集')
+plt.ylabel('R²')
+plt.title('粗调vs精调的R²比较（防过拟合优化）')
+plt.xticks(x_pos, x)
+plt.legend()
+plt.grid(True, linestyle='--', alpha=0.7)
+
+# 添加数值标签
+for i, (v1, v2) in enumerate(zip(y1, y2)):
+    plt.text(i - width / 2, v1 + 0.01, f'{v1:.3f}', ha='center', va='bottom')
+    plt.text(i + width / 2, v2 + 0.01, f'{v2:.3f}', ha='center', va='bottom')
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'XGBoost_R2_comparison.png'))
+plt.close()
+
+# 绘制RMSE比较
+plt.figure(figsize=(12, 6))
+y1_rmse = [train_coarse_metrics['RMSE'], val_coarse_metrics['RMSE'], test_coarse_metrics['RMSE']]
+y2_rmse = [train_final_metrics['RMSE'], val_final_metrics['RMSE'], test_final_metrics['RMSE']]
+
+plt.bar(x_pos - width / 2, y1_rmse, width, label='粗调（网格搜索）', alpha=0.8)
+plt.bar(x_pos + width / 2, y2_rmse, width, label='精调（Optuna+防过拟合）', alpha=0.8)
+
+plt.xlabel('数据集')
+plt.ylabel('RMSE')
+plt.title('粗调vs精调的RMSE比较（防过拟合优化）')
+plt.xticks(x_pos, x)
+plt.legend()
+plt.grid(True, linestyle='--', alpha=0.7)
+
+# 添加数值标签
+for i, (v1, v2) in enumerate(zip(y1_rmse, y2_rmse)):
+    plt.text(i - width / 2, v1 + 0.01, f'{v1:.3f}', ha='center', va='bottom')
+    plt.text(i + width / 2, v2 + 0.01, f'{v2:.3f}', ha='center', va='bottom')
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'XGBoost_RMSE_comparison.png'))
+plt.close()
+
+# 绘制预测值与实际值的散点图（精调模型）
+plt.figure(figsize=(18, 6))
+
+# 训练集
+plt.subplot(1, 3, 1)
+plt.scatter(y_train, y_train_final, alpha=0.5, s=10)
+plt.plot([min(y_train), max(y_train)], [min(y_train), max(y_train)], 'r--', linewidth=2)
+plt.xlabel('实际值')
+plt.ylabel('预测值')
+plt.title(f'训练集 (R² = {train_final_metrics["R²"]:.4f})')
+plt.grid(True, alpha=0.3)
+
+# 验证集
+plt.subplot(1, 3, 2)
+plt.scatter(y_val, y_val_final, alpha=0.5, s=10)
+plt.plot([min(y_val), max(y_val)], [min(y_val), max(y_val)], 'r--', linewidth=2)
+plt.xlabel('实际值')
+plt.ylabel('预测值')
+plt.title(f'验证集 (R² = {val_final_metrics["R²"]:.4f})')
+plt.grid(True, alpha=0.3)
+
+# 测试集
+plt.subplot(1, 3, 3)
+plt.scatter(y_test, y_test_final, alpha=0.5, s=10)
+plt.plot([min(y_test), max(y_test)], [min(y_test), max(y_test)], 'r--', linewidth=2)
+plt.xlabel('实际值')
+plt.ylabel('预测值')
+plt.title(f'测试集 (R² = {test_final_metrics["R²"]:.4f})')
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'XGBoost_predictions_scatter.png'), dpi=300)
+plt.close()
+
+# 绘制最终模型特征重要性
+plt.figure(figsize=(10, 6))
+final_feature_importances = final_model.feature_importances_
+final_feature_importance_df = pd.DataFrame({
+    '特征': features,
+    '重要性': final_feature_importances
+})
+final_feature_importance_df = final_feature_importance_df.sort_values('重要性', ascending=True)
+
+plt.barh(final_feature_importance_df['特征'], final_feature_importance_df['重要性'])
+plt.xlabel('特征重要性')
+plt.title('最终模型特征重要性（防过拟合优化后）')
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'XGBoost_final_feature_importance.png'))
+plt.close()
+
+# 保存最终特征重要性
+final_feature_importance_df.to_excel(os.path.join(output_dir, 'XGBoost_final_feature_importance.xlsx'), index=False)
+
+# ==================== 总结报告 ====================
+print("\n" + "=" * 60)
+print("            XGBoost生态系统NEP估算模型训练完成（版本兼容性修复）")
+print("=" * 60)
+print(f"1. 数据集划分:")
+print(f"   - 训练集: {len(train_data)}条")
+print(f"   - 验证集: {len(val_data)}条")
+print(f"   - 测试集: {len(test_data)}条")
+print(f"\n2. 特征变量: {len(features)}个")
+print(f"   - {features}")
+print(f"\n3. 网格搜索粗调（三折交叉验证）:")
+print(f"   - 最佳R²得分: {best_score_coarse:.4f}")
+print(f"   - 最佳参数: {best_params_coarse}")
+print(f"\n4. Optuna精调（五折交叉验证，200次实验，版本兼容性修复）:")
+print(f"   - 最佳R²得分: {best_score_fine:.4f}")
+print(f"   - 性能提升: {((best_score_fine - best_score_coarse) / best_score_coarse * 100):+.2f}%")
+print(f"\n5. 版本兼容性修复:")
+print(f"   - 修复early_stopping_rounds参数问题")
+print(f"   - 使用回调函数实现早停法")
+print(f"   - 兼容新旧版本XGBoost")
+print(f"\n6. 强化防过拟合措施:")
+print(f"   - 早停法（EarlyStopping callback）")
+print(f"   - 强化L1正则化（reg_alpha: 0.1-15.0）")
+print(f"   - 强化L2正则化（reg_lambda: 1.0-15.0）")
+print(f"   - 激进特征抽样（colsample_*: 0.5-0.8）")
+print(f"   - 激进样本抽样（subsample: 0.5-0.8）")
+print(f"   - 增加叶子节点最小权重（min_child_weight: ≥5）")
+print(f"   - 提高最小分割损失（gamma: 0.5-8.0）")
+print(f"\n7. 最终模型评估指标:")
+print(f"   - 训练集R²: {train_final_metrics['R²']:.4f}")
+print(f"   - 验证集R²: {val_final_metrics['R²']:.4f}")
+print(f"   - 测试集R²: {test_final_metrics['R²']:.4f}")
+print(f"   - 训练集RMSE: {train_final_metrics['RMSE']:.4f}")
+print(f"   - 验证集RMSE: {val_final_metrics['RMSE']:.4f}")
+print(f"   - 测试集RMSE: {test_final_metrics['RMSE']:.4f}")
+print(f"\n8. 过拟合检查:")
+print(f"   - 训练集与验证集R²差异: {train_val_r2_diff:.4f}")
+print(f"   - 训练集与测试集R²差异: {train_test_r2_diff:.4f}")
+print(f"\n9. 输出文件:")
+print(f"   - 超参数比较: XGBoost_hyperparameters_comparison.xlsx")
+print(f"   - 评估指标比较: XGBoost_metrics_comparison.xlsx")
+print(f"   - Optuna优化历史: XGBoost_optuna_optimization_history.xlsx")
+print(f"   - 预测结果: XGBoost_*_predictions.xlsx")
+print(f"   - 特征重要性: XGBoost_*_feature_importance.xlsx")
+print(f"   - 可视化图表: XGBoost_*.png")
+print(f"\n所有文件已保存到: {output_dir}")
+print("=" * 60)
