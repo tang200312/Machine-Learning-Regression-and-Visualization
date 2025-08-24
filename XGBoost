@@ -368,10 +368,6 @@ print(f"\n过拟合检查:")
 print(f"训练集与验证集R²差异: {train_val_r2_diff:.4f}")
 print(f"训练集与测试集R²差异: {train_test_r2_diff:.4f}")
 
-if train_val_r2_diff > 0.05 or train_test_r2_diff > 0.05:
-    print("⚠️  警告：模型可能存在过拟合，建议进一步调整参数")
-else:
-    print("✅ 模型泛化性能良好，无明显过拟合")
 
 # 创建完整的评估指标比较表
 metrics_comparison_df = pd.DataFrame({
