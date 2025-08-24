@@ -1,0 +1,49 @@
+import pandas as pd
+import os
+
+# 1. 设置路径
+input_path = r"F:\二区深度学习\异常值处理+PCA.xlsx"
+base_dir = os.path.dirname(input_path)
+output_dir = os.path.join(base_dir, "异常值处理后")
+os.makedirs(output_dir, exist_ok=True)
+
+# 2. 读取原始数据
+df = pd.read_excel(input_path)
+
+# 3. 创建结果副本
+df_cleaned = df.iloc[:, :2].copy()  # 保留前两列：日期、时分
+df_flags = df.iloc[:, :2].copy()    # 标记哪些值被替换，1表示被替换
+
+# 4. 从第3列开始逐列处理
+for col in df.columns[2:]:
+    series = df[col]
+
+    # IQR计算
+    Q1 = series.quantile(0.25)
+    Q3 = series.quantile(0.75)
+    IQR = Q3 - Q1
+    lower = Q1 - 1.5 * IQR
+    upper = Q3 + 1.5 * IQR
+    outliers = (series < lower) | (series > upper)
+
+    # 滑动平均
+    smoothed = series.rolling(window=5, center=True, min_periods=1).mean()
+
+    # 替换
+    cleaned = series.copy()
+    cleaned[outliers] = smoothed[outliers]
+
+    # 添加列到结果表
+    df_cleaned[col] = cleaned
+    df_flags[col] = outliers.astype(int)  # 标记被替换为 1
+
+# 5. 保存结果
+output_main = os.path.join(output_dir, "异常值处理+PCA_处理后.xlsx")
+output_flags = os.path.join(output_dir, "处理位置记录.xlsx")
+
+df_cleaned.to_excel(output_main, index=False)
+df_flags.to_excel(output_flags, index=False)
+
+print(" 异常值处理完成！")
+print("处理后数据保存至：", output_main)
+print("处理位置记录保存至：", output_flags)
