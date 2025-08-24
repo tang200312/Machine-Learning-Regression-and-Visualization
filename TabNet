@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+from sklearn.model_selection import KFold, StratifiedKFold
 from pytorch_tabnet.tab_model import TabNetRegressor
 import torch
 import warnings
@@ -17,7 +17,7 @@ from datetime import datetime
 warnings.filterwarnings('ignore')
 
 # 创建输出目录
-output_dir = r"D:\PY\1"
+output_dir = 'D:\\PY\\TabNET精调'
 os.makedirs(output_dir, exist_ok=True)
 
 # 设置随机种子
@@ -27,35 +27,13 @@ torch.manual_seed(seed)
 
 # 加载数据
 print("加载数据...")
-data = pd.read_excel(r"D:\PY\数据集.xlsx")
+train_data = pd.read_excel('D:\\PY\\train.xlsx')
+validation_data = pd.read_excel('D:\\PY\\validation.xlsx')
+test_data = pd.read_excel('D:\\PY\\test.xlsx')
 
 # 定义特征和目标变量
 features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
 target = "NEP"
-
-# 数据划分：训练集21888条，验证集7344条，测试集5856条
-print("划分数据集...")
-print(f"总数据量: {len(data)}")
-
-# 首先分离出测试集（5856条）
-train_val_data, test_data = train_test_split(
-    data,
-    test_size=5856,
-    random_state=seed,
-    shuffle=True
-)
-
-# 然后从剩余数据中分离训练集和验证集
-train_data, validation_data = train_test_split(
-    train_val_data,
-    test_size=7344,  # 验证集7344条
-    random_state=seed,
-    shuffle=True
-)
-
-print(f"训练集数量: {len(train_data)}")
-print(f"验证集数量: {len(validation_data)}")
-print(f"测试集数量: {len(test_data)}")
 
 
 # 数据预处理函数
@@ -180,6 +158,8 @@ def objective(trial):
             verbose=0
         )
 
+        # 移除自定义的EarlyStoppingCallback类和实例化代码
+
         # 训练模型 - 使用内置早停机制
         model.fit(
             X_cv_train, y_cv_train,
@@ -190,6 +170,7 @@ def objective(trial):
             virtual_batch_size=params['virtual_batch_size'],
             eval_metric=['rmse'],
             drop_last=True
+            # 移除callbacks参数
         )
 
         # 评估模型
@@ -262,7 +243,22 @@ final_model = TabNetRegressor(
     verbose=1
 )
 
-# 训练模型 - 不使用自定义回调，直接从模型历史获取损失
+
+# 训练最终模型时手动记录训练历史
+class MetricsCallback:
+    def __init__(self):
+        self.train_rmse = []
+        self.valid_rmse = []
+
+    def __call__(self, epoch, metrics):
+        self.train_rmse.append(metrics['train_rmse'])
+        self.valid_rmse.append(metrics['valid_rmse'])
+        return False  # 不提前停止训练
+
+
+metrics_callback = MetricsCallback()
+
+# 训练模型
 final_model.fit(
     X_train_scaled, y_train,
     eval_set=[(X_train_scaled, y_train), (X_val_scaled, y_val)],
@@ -271,7 +267,8 @@ final_model.fit(
     patience=best_params_optuna['patience'],
     batch_size=best_params_optuna['batch_size'],
     virtual_batch_size=best_params_optuna['virtual_batch_size'],
-    eval_metric=['rmse']
+    eval_metric=['rmse'],
+    callbacks=[metrics_callback]
 )
 
 # 保存模型
@@ -279,20 +276,17 @@ model_path = os.path.join(output_dir, 'tabnet_final_model.pkl')
 joblib.dump(final_model, model_path)
 print(f"最终模型已保存到 {model_path}")
 
-# 从模型历史中获取损失并绘制曲线
-if hasattr(final_model, 'history') and final_model.history is not None:
-    plt.figure(figsize=(10, 6))
-    plt.plot(final_model.history['train_rmse'], label='训练集RMSE')
-    plt.plot(final_model.history['valid_rmse'], label='验证集RMSE')
-    plt.xlabel('Epoch')
-    plt.ylabel('RMSE')
-    plt.title('TabNet训练和验证损失曲线')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(output_dir, 'tabnet_loss_curve.png'))
-    plt.close()
-else:
-    print("警告：无法获取训练历史，跳过损失曲线绘制")
+# 使用记录的损失绘制曲线
+plt.figure(figsize=(10, 6))
+plt.plot(metrics_callback.train_rmse, label='训练集RMSE')
+plt.plot(metrics_callback.valid_rmse, label='验证集RMSE')
+plt.xlabel('Epoch')
+plt.ylabel('RMSE')
+plt.title('TabNet训练和验证损失曲线')
+plt.legend()
+plt.grid(True)
+plt.savefig(os.path.join(output_dir, 'tabnet_loss_curve.png'))
+plt.close()
 
 # 评估模型
 print("\n模型评估:")
