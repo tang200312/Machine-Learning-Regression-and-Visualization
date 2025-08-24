@@ -6,82 +6,109 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.model_selection import KFold
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from tensorflow.keras.regularizers import l1, l2, l1_l2
+# 使用scikeras替代
 from scikeras.wrappers import KerasRegressor
 import tensorflow as tf
 import warnings
 import optuna
+# 移除这一行: from optuna.integration import TFKerasPruningCallback
 import joblib
 import json
 
 warnings.filterwarnings('ignore')
 
-# 随机种子固定
+# 设置随机种子，确保结果可复现
 np.random.seed(42)
 tf.random.set_seed(42)
 
-# 路径配置
-output_dir = "F:\\Machine leaning_SHAP\\KNN2"
+# 创建输出目录
+output_dir = 'D:\\PY\\ANN精调'
 os.makedirs(output_dir, exist_ok=True)
-data_path = "F:\\Machine leaning_SHAP\\数据集.xlsx"
 
 
-# 数据加载与划分
+# 数据加载和划分函数
 def load_and_split_data(file_path):
+    """
+    加载统一数据集并按指定比例划分
+    训练集: 21888条, 验证集: 7344条, 测试集: 5856条
+    """
     try:
         data = pd.read_excel(file_path)
-        print(f"1. 加载数据: {file_path} (总量: {len(data)})")
+        print(f"成功加载数据: {file_path}")
+        print(f"总数据量: {len(data)}")
 
+        # 定义特征和目标变量
         features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
         target = "NEP"
-        missing_cols = [col for col in features + [target] if col not in data.columns]
-        if missing_cols:
-            raise ValueError(f"缺失列: {missing_cols}")
 
+        # 检查数据完整性
+        if not all(col in data.columns for col in features + [target]):
+            missing_cols = [col for col in features + [target] if col not in data.columns]
+            raise ValueError(f"数据集缺少以下列: {missing_cols}")
+
+        # 删除包含缺失值的行
         data_clean = data[features + [target]].dropna()
         print(f"清洗后数据量: {len(data_clean)}")
 
+        # 打乱数据顺序
         data_shuffled = data_clean.sample(frac=1, random_state=42).reset_index(drop=True)
-        train_size, val_size, test_size = 21888, 7344, 5856
-        required_total = train_size + val_size + test_size
 
-        if len(data_shuffled) < required_total:
-            ratio = len(data_shuffled) / required_total
+        # 计算划分索引
+        total_samples = len(data_shuffled)
+        train_size = 21888
+        val_size = 7344
+        test_size = 5856
+
+        # 检查数据量是否足够
+        required_total = train_size + val_size + test_size
+        if total_samples < required_total:
+            print(f"警告: 数据量不足，需要{required_total}条，实际{total_samples}条")
+            # 按比例调整
+            ratio = total_samples / required_total
             train_size = int(train_size * ratio)
             val_size = int(val_size * ratio)
-            test_size = len(data_shuffled) - train_size - val_size
-            print(f"数据不足，调整划分: 训练集{train_size}, 验证集{val_size}, 测试集{test_size}")
+            test_size = total_samples - train_size - val_size
+            print(f"调整后划分: 训练集{train_size}, 验证集{val_size}, 测试集{test_size}")
 
+        # 划分数据集
         train_data = data_shuffled[:train_size]
         val_data = data_shuffled[train_size:train_size + val_size]
         test_data = data_shuffled[train_size + val_size:train_size + val_size + test_size]
 
-        print(f"划分完成: 训练集{len(train_data)} | 验证集{len(val_data)} | 测试集{len(test_data)}")
+        print(f"数据集划分完成:")
+        print(f"训练集: {len(train_data)} 条")
+        print(f"验证集: {len(val_data)} 条")
+        print(f"测试集: {len(test_data)} 条")
+
         return train_data, val_data, test_data, features
 
     except Exception as e:
-        print(f"数据加载失败: {e}")
+        print(f"加载数据失败: {e}")
         return None, None, None, None
 
 
-# 数据预处理
+# 数据预处理函数
 def preprocess_data(train_data, val_data, test_data, features):
     target = "NEP"
-    # 提取特征与目标
-    X_train, y_train = train_data[features].values, train_data[target].values
-    X_val, y_val = val_data[features].values, val_data[target].values
-    X_test, y_test = test_data[features].values, test_data[target].values
 
-    # 特征归一化
+    # 提取特征和目标变量
+    X_train = train_data[features].values
+    y_train = train_data[target].values
+    X_val = val_data[features].values
+    y_val = val_data[target].values
+    X_test = test_data[features].values
+    y_test = test_data[target].values
+
+    # 归一化处理
     scaler_X = MinMaxScaler()
     X_train_scaled = scaler_X.fit_transform(X_train)
     X_val_scaled = scaler_X.transform(X_val)
     X_test_scaled = scaler_X.transform(X_test)
 
-    # 目标归一化
+    # 目标变量归一化
     scaler_y = MinMaxScaler()
     y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
     y_val_scaled = scaler_y.transform(y_val.reshape(-1, 1)).flatten()
@@ -91,18 +118,22 @@ def preprocess_data(train_data, val_data, test_data, features):
             X_test_scaled, y_test_scaled, scaler_X, scaler_y)
 
 
-# ANN模型构建
+# 创建ANN模型的函数（用于Optuna调优）
 def create_ann_model(neurons=128, hidden_layers=3, dropout_rate=0.1, learning_rate=0.001,
                      activation='relu', kernel_initializer='he_normal',
                      kernel_regularizer=None, l1_ratio=0.01, l2_ratio=0.01,
                      use_batch_norm=False):
     model = Sequential()
-    # 正则化器设置
+
+    # 输入层
     if kernel_regularizer == 'l1':
+        from tensorflow.keras.regularizers import l1
         regularizer = l1(l1_ratio)
     elif kernel_regularizer == 'l2':
+        from tensorflow.keras.regularizers import l2
         regularizer = l2(l2_ratio)
     elif kernel_regularizer == 'l1_l2':
+        from tensorflow.keras.regularizers import l1_l2
         regularizer = l1_l2(l1=l1_ratio, l2=l2_ratio)
     else:
         regularizer = None
@@ -111,6 +142,7 @@ def create_ann_model(neurons=128, hidden_layers=3, dropout_rate=0.1, learning_ra
     model.add(Dense(neurons, activation=activation, input_shape=(10,),
                     kernel_initializer=kernel_initializer, kernel_regularizer=regularizer))
     if use_batch_norm:
+        from tensorflow.keras.layers import BatchNormalization
         model.add(BatchNormalization())
     model.add(Dropout(dropout_rate))
 
@@ -124,25 +156,94 @@ def create_ann_model(neurons=128, hidden_layers=3, dropout_rate=0.1, learning_ra
 
     # 输出层
     model.add(Dense(1))
-    model.compile(optimizer=Adam(learning_rate=learning_rate), loss='mse', metrics=['mae'])
+
+    # 编译模型
+    model.compile(optimizer=Adam(learning_rate=learning_rate),
+                  loss='mse',
+                  metrics=['mae'])
+
     return model
 
 
-# 模型评估
+# 评估模型性能的函数
 def evaluate_model(y_true, y_pred, scaler_y=None):
-    if scaler_y:
+    if scaler_y is not None:
+        # 反归一化
         y_true = scaler_y.inverse_transform(y_true.reshape(-1, 1)).flatten()
         y_pred = scaler_y.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+
     return {
-        'R²': r2_score(y_true, y_pred),
-        'MAE': mean_absolute_error(y_true, y_pred),
-        'MSE': mean_squared_error(y_true, y_pred),
-        'RMSE': np.sqrt(mean_squared_error(y_true, y_pred))
+        'R²': r2,
+        'MAE': mae,
+        'MSE': mse,
+        'RMSE': rmse
     }
 
 
-# Optuna交叉验证目标函数
+# Optuna目标函数
+def objective(trial, X_train, y_train, X_val, y_val):
+    # 定义超参数搜索空间
+    neurons = trial.suggest_categorical('neurons', [64, 128, 256, 512])
+    hidden_layers = trial.suggest_int('hidden_layers', 1, 5)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.0, 0.5)
+    learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
+    batch_size = trial.suggest_categorical('batch_size', [16, 32, 64, 128])
+    activation = trial.suggest_categorical('activation', ['relu', 'elu', 'selu'])
+    kernel_initializer = trial.suggest_categorical('kernel_initializer',
+                                                   ['he_normal', 'he_uniform', 'glorot_normal', 'glorot_uniform'])
+    kernel_regularizer = trial.suggest_categorical('kernel_regularizer',
+                                                   [None, 'l1', 'l2', 'l1_l2'])
+    l1_ratio = trial.suggest_float('l1_ratio', 1e-5, 1e-2, log=True)
+    l2_ratio = trial.suggest_float('l2_ratio', 1e-5, 1e-2, log=True)
+    patience = trial.suggest_int('patience', 10, 50)
+    use_batch_norm = trial.suggest_categorical('use_batch_norm', [True, False])
+
+    # 创建模型
+    model = create_ann_model(
+        neurons=neurons,
+        hidden_layers=hidden_layers,
+        dropout_rate=dropout_rate,
+        learning_rate=learning_rate,
+        activation=activation,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        l1_ratio=l1_ratio,
+        l2_ratio=l2_ratio,
+        use_batch_norm=use_batch_norm
+    )
+
+    # 早停回调
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=patience,
+        restore_best_weights=True
+    )
+
+    # 训练模型
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=100,  # 设置较大的轮数，让早停机制生效
+        batch_size=batch_size,
+        callbacks=[early_stopping],  # 移除TFKerasPruningCallback
+        verbose=0
+    )
+
+    # 在验证集上评估
+    val_pred = model.predict(X_val)
+    val_mse = mean_squared_error(y_val, val_pred)
+
+    return val_mse
+
+
+# 使用交叉验证的Optuna目标函数
 def objective_cv(trial, X, y, n_splits=5):
+    # 定义超参数搜索空间 - 基于网格搜索的最优参数进行扩展
     params = {
         'model__neurons': trial.suggest_categorical('neurons', [64, 128, 256, 512]),
         'model__hidden_layers': trial.suggest_int('hidden_layers', 2, 5),
@@ -150,143 +251,201 @@ def objective_cv(trial, X, y, n_splits=5):
         'model__learning_rate': trial.suggest_float('learning_rate', 1e-4, 5e-3, log=True),
         'model__activation': trial.suggest_categorical('activation', ['relu', 'elu', 'selu', 'tanh']),
         'model__kernel_initializer': trial.suggest_categorical('kernel_initializer',
-                                                               ['he_normal', 'he_uniform', 'glorot_normal', 'glorot_uniform']),
-        'model__kernel_regularizer': trial.suggest_categorical('kernel_regularizer', [None, 'l1', 'l2', 'l1_l2']),
+                                                               ['he_normal', 'he_uniform', 'glorot_normal',
+                                                                'glorot_uniform']),
+        'model__kernel_regularizer': trial.suggest_categorical('kernel_regularizer',
+                                                               [None, 'l1', 'l2', 'l1_l2']),
         'model__l1_ratio': trial.suggest_float('l1_ratio', 1e-5, 1e-2, log=True),
         'model__l2_ratio': trial.suggest_float('l2_ratio', 1e-5, 1e-2, log=True),
         'model__use_batch_norm': trial.suggest_categorical('use_batch_norm', [True, False]),
         'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
-        'epochs': 100
+        'epochs': 100  # 设置较大的轮数，让早停机制生效
     }
 
-    model = KerasRegressor(model=create_ann_model, verbose=0)
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-    scores = []
+    # 创建KerasRegressor
+    model = KerasRegressor(
+        model=create_ann_model,
+        verbose=0
+    )
 
+    # 设置交叉验证
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+    # 执行交叉验证
+    scores = []
     for train_idx, val_idx in kf.split(X):
         X_train_fold, X_val_fold = X[train_idx], X[val_idx]
         y_train_fold, y_val_fold = y[train_idx], y[val_idx]
 
+        # 设置模型参数
         for param_name, param_value in params.items():
             setattr(model, param_name, param_value)
 
+        # 训练模型
         model.fit(X_train_fold, y_train_fold,
                   validation_data=(X_val_fold, y_val_fold),
                   callbacks=[EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)],
                   verbose=0)
 
+        # 预测并计算MSE
         y_pred = model.predict(X_val_fold)
-        scores.append(mean_squared_error(y_val_fold, y_pred))
+        mse = mean_squared_error(y_val_fold, y_pred)
+        scores.append(mse)
 
+    # 返回平均MSE
     return np.mean(scores)
 
 
 # 主函数
 def main():
-    # 1. 数据加载与预处理
-    train_data, val_data, test_data, features = load_and_split_data(data_path)
-    if not all([train_data, val_data, test_data]):
-        print("程序终止")
+    # 加载并划分数据
+    train_data, val_data, test_data, features = load_and_split_data('D:\\PY\\数据集.xlsx')
+
+    if train_data is None or val_data is None or test_data is None:
+        print("数据加载失败，程序终止")
         return
 
+    # 数据预处理
     (X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled,
      X_test_scaled, y_test_scaled, scaler_X, scaler_y) = preprocess_data(train_data, val_data, test_data, features)
 
-    print(f"2. 预处理完成: 训练集{X_train_scaled.shape[0]} | 验证集{X_val_scaled.shape[0]} | 测试集{X_test_scaled.shape[0]}")
+    print("数据预处理完成")
+    print(f"训练集大小: {X_train_scaled.shape[0]}")
+    print(f"验证集大小: {X_val_scaled.shape[0]}")
+    print(f"测试集大小: {X_test_scaled.shape[0]}")
 
-    # 保存划分数据
+    # 保存划分后的数据集
     train_data.to_excel(os.path.join(output_dir, 'train_dataset.xlsx'), index=False)
     val_data.to_excel(os.path.join(output_dir, 'validation_dataset.xlsx'), index=False)
     test_data.to_excel(os.path.join(output_dir, 'test_dataset.xlsx'), index=False)
+    print(f"划分后的数据集已保存到: {output_dir}")
 
-    # 3. 网格搜索基准参数
-    grid_best_params = {
-        'batch_size': 64, 'epochs': 50, 'model__dropout_rate': 0.1,
-        'model__hidden_layers': 3, 'model__learning_rate': 0.001, 'model__neurons': 128
+    # 记录网格搜索的最佳参数
+    grid_search_best_params = {
+        'batch_size': 64,
+        'epochs': 50,
+        'model__dropout_rate': 0.1,
+        'model__hidden_layers': 3,
+        'model__learning_rate': 0.001,
+        'model__neurons': 128
     }
-    print(f"3. 网格搜索最佳参数: {grid_best_params}")
-    with open(os.path.join(output_dir, 'grid_search_best_params.json'), 'w') as f:
-        json.dump(grid_best_params, f, indent=4)
 
-    # 4. Optuna调优
+    print("网格搜索最佳参数:")
+    for param, value in grid_search_best_params.items():
+        print(f"{param}: {value}")
+
+    # 保存网格搜索最佳参数
+    with open(os.path.join(output_dir, 'grid_search_best_params.json'), 'w') as f:
+        json.dump(grid_search_best_params, f, indent=4)
+
+    # 合并训练集和验证集用于Optuna调优
     X_train_val = np.vstack((X_train_scaled, X_val_scaled))
     y_train_val = np.concatenate((y_train_scaled, y_val_scaled))
-    print("4. Optuna调优: 5折交叉验证，200次试验")
 
-    study = optuna.create_study(direction='minimize', study_name='ann_opt', pruner=optuna.pruners.MedianPruner())
-    study.optimize(lambda trial: objective_cv(trial, X_train_val, y_train_val),
-                   n_trials=200, show_progress_bar=True)
+    print("\n开始Optuna超参数精调...")
+    print("使用五折交叉验证，共进行200次实验")
 
-    opt_best_params = study.best_params
-    print(f"Optuna最佳参数: {opt_best_params}")
+    # 创建Optuna study
+    study = optuna.create_study(direction='minimize',
+                                study_name='ann_hyperparameter_optimization',
+                                pruner=optuna.pruners.MedianPruner())
+
+    # 执行优化
+    study.optimize(lambda trial: objective_cv(trial, X_train_val, y_train_val, n_splits=5),
+                   n_trials=200,
+                   show_progress_bar=True)
+
+    # 获取最佳参数
+    best_params = study.best_params
+    print("\nOptuna最佳参数:")
+    for param, value in best_params.items():
+        print(f"{param}: {value}")
+
+    # 保存Optuna最佳参数
     with open(os.path.join(output_dir, 'optuna_best_params.json'), 'w') as f:
-        json.dump(opt_best_params, f, indent=4)
+        json.dump(best_params, f, indent=4)
+
+    # 保存Optuna study
     joblib.dump(study, os.path.join(output_dir, 'optuna_study.pkl'))
 
-    # 5. 训练最终模型
-    print("5. 训练最终模型")
+    # 使用最佳参数创建最终模型
     final_model = create_ann_model(
-        neurons=opt_best_params.get('neurons', 128),
-        hidden_layers=opt_best_params.get('hidden_layers', 3),
-        dropout_rate=opt_best_params.get('dropout_rate', 0.1),
-        learning_rate=opt_best_params.get('learning_rate', 0.001),
-        activation=opt_best_params.get('activation', 'relu'),
-        kernel_initializer=opt_best_params.get('kernel_initializer', 'he_normal'),
-        kernel_regularizer=opt_best_params.get('kernel_regularizer'),
-        l1_ratio=opt_best_params.get('l1_ratio', 0.01),
-        l2_ratio=opt_best_params.get('l2_ratio', 0.01),
-        use_batch_norm=opt_best_params.get('use_batch_norm', False)
+        neurons=best_params.get('neurons', 128),
+        hidden_layers=best_params.get('hidden_layers', 3),
+        dropout_rate=best_params.get('dropout_rate', 0.1),
+        learning_rate=best_params.get('learning_rate', 0.001),
+        activation=best_params.get('activation', 'relu'),
+        kernel_initializer=best_params.get('kernel_initializer', 'he_normal'),
+        kernel_regularizer=best_params.get('kernel_regularizer', None),
+        l1_ratio=best_params.get('l1_ratio', 0.01),
+        l2_ratio=best_params.get('l2_ratio', 0.01),
+        use_batch_norm=best_params.get('use_batch_norm', False)
     )
 
+    # 设置早停和模型检查点回调
     callbacks = [
-        EarlyStopping(monitor='val_loss', patience=opt_best_params.get('patience', 20), restore_best_weights=True),
-        ModelCheckpoint(os.path.join(output_dir, 'best_ann_model.h5'), monitor='val_loss', save_best_only=True)
+        EarlyStopping(monitor='val_loss', patience=best_params.get('patience', 20), restore_best_weights=True),
+        ModelCheckpoint(os.path.join(output_dir, 'best_ann_model.h5'),
+                        monitor='val_loss', save_best_only=True)
     ]
 
+    # 训练最终模型
+    print("\n训练最终模型...")
     history = final_model.fit(
         X_train_scaled, y_train_scaled,
         validation_data=(X_val_scaled, y_val_scaled),
-        epochs=100, batch_size=opt_best_params.get('batch_size', 64),
-        callbacks=callbacks, verbose=1
+        epochs=100,  # 设置较大的轮数，让早停机制生效
+        batch_size=best_params.get('batch_size', 64),
+        callbacks=callbacks,
+        verbose=1
     )
 
-    # 6. 可视化损失曲线
+    # 绘制损失曲线
     plt.figure(figsize=(12, 6))
     plt.subplot(1, 2, 1)
     plt.plot(history.history['loss'], label='训练损失')
     plt.plot(history.history['val_loss'], label='验证损失')
-    plt.title('损失曲线')
+    plt.title('模型损失曲线')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.ylabel('损失')
     plt.legend()
 
     plt.subplot(1, 2, 2)
     plt.plot(history.history['mae'], label='训练MAE')
     plt.plot(history.history['val_mae'], label='验证MAE')
-    plt.title('MAE曲线')
+    plt.title('模型MAE曲线')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
     plt.legend()
+
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'ann_loss_curves.png'))
     plt.close()
 
-    # 7. 模型预测与评估
+    # 模型预测
     y_train_pred = final_model.predict(X_train_scaled)
     y_val_pred = final_model.predict(X_val_scaled)
     y_test_pred = final_model.predict(X_test_scaled)
 
+    # 评估模型性能
     train_metrics = evaluate_model(y_train_scaled, y_train_pred, scaler_y)
     val_metrics = evaluate_model(y_val_scaled, y_val_pred, scaler_y)
     test_metrics = evaluate_model(y_test_scaled, y_test_pred, scaler_y)
 
-    print("\n6. 模型评估:")
-    print(f"训练集: R²{train_metrics['R²']:.4f} | MAE{train_metrics['MAE']:.4f} | MSE{train_metrics['MSE']:.4f} | RMSE{train_metrics['RMSE']:.4f}")
-    print(f"验证集: R²{val_metrics['R²']:.4f} | MAE{val_metrics['MAE']:.4f} | MSE{val_metrics['MSE']:.4f} | RMSE{val_metrics['RMSE']:.4f}")
-    print(f"测试集: R²{test_metrics['R²']:.4f} | MAE{test_metrics['MAE']:.4f} | MSE{test_metrics['MSE']:.4f} | RMSE{test_metrics['RMSE']:.4f}")
+    # 输出评估指标
+    print("\n训练集评估指标:")
+    for metric, value in train_metrics.items():
+        print(f"{metric}: {value:.4f}")
 
-    # 8. 保存结果
-    # 评估指标
+    print("\n验证集评估指标:")
+    for metric, value in val_metrics.items():
+        print(f"{metric}: {value:.4f}")
+
+    print("\n测试集评估指标:")
+    for metric, value in test_metrics.items():
+        print(f"{metric}: {value:.4f}")
+
+    # 保存评估指标到CSV文件
     metrics_df = pd.DataFrame({
         'Metric': list(train_metrics.keys()),
         'Training': list(train_metrics.values()),
@@ -295,19 +454,26 @@ def main():
     })
     metrics_df.to_csv(os.path.join(output_dir, 'ann_metrics.csv'), index=False)
 
-    # 网格搜索模型对比
+    # 保存超参数调优结果比较
+    # 使用网格搜索最佳参数创建模型并评估
     grid_model = create_ann_model(
-        neurons=grid_best_params['model__neurons'],
-        hidden_layers=grid_best_params['model__hidden_layers'],
-        dropout_rate=grid_best_params['model__dropout_rate'],
-        learning_rate=grid_best_params['model__learning_rate']
+        neurons=grid_search_best_params.get('model__neurons', 128),
+        hidden_layers=grid_search_best_params.get('model__hidden_layers', 3),
+        dropout_rate=grid_search_best_params.get('model__dropout_rate', 0.1),
+        learning_rate=grid_search_best_params.get('model__learning_rate', 0.001)
     )
-    grid_model.fit(X_train_scaled, y_train_scaled,
-                   validation_data=(X_val_scaled, y_val_scaled),
-                   epochs=grid_best_params['epochs'], batch_size=grid_best_params['batch_size'],
-                   callbacks=[EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)],
-                   verbose=0)
 
+    # 训练网格搜索模型
+    grid_history = grid_model.fit(
+        X_train_scaled, y_train_scaled,
+        validation_data=(X_val_scaled, y_val_scaled),
+        epochs=grid_search_best_params.get('epochs', 50),
+        batch_size=grid_search_best_params.get('batch_size', 64),
+        callbacks=[EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)],
+        verbose=0
+    )
+
+    # 评估网格搜索模型
     grid_train_pred = grid_model.predict(X_train_scaled)
     grid_val_pred = grid_model.predict(X_val_scaled)
     grid_test_pred = grid_model.predict(X_test_scaled)
@@ -316,5 +482,97 @@ def main():
     grid_val_metrics = evaluate_model(y_val_scaled, grid_val_pred, scaler_y)
     grid_test_metrics = evaluate_model(y_test_scaled, grid_test_pred, scaler_y)
 
-    tuning_comp = pd.DataFrame({
-        'Metric': list(train_metrics.keys
+    # 创建超参数调优比较DataFrame
+    tuning_comparison = pd.DataFrame({
+        'Metric': list(train_metrics.keys()),
+        'Grid_Search_Training': list(grid_train_metrics.values()),
+        'Grid_Search_Validation': list(grid_val_metrics.values()),
+        'Grid_Search_Testing': list(grid_test_metrics.values()),
+        'Optuna_Training': list(train_metrics.values()),
+        'Optuna_Validation': list(val_metrics.values()),
+        'Optuna_Testing': list(test_metrics.values())
+    })
+
+    # 保存超参数调优比较结果
+    tuning_comparison.to_csv(os.path.join(output_dir, 'hyperparameter_tuning_comparison.csv'), index=False)
+
+    # 保存预测结果
+    # 反归一化预测值
+    y_train_pred_original = scaler_y.inverse_transform(y_train_pred).flatten()
+    y_val_pred_original = scaler_y.inverse_transform(y_val_pred).flatten()
+    y_test_pred_original = scaler_y.inverse_transform(y_test_pred).flatten()
+
+    # 创建预测结果DataFrame
+    train_pred_df = train_data.copy()
+    train_pred_df['NEP_Predicted'] = y_train_pred_original
+
+    val_pred_df = val_data.copy()
+    val_pred_df['NEP_Predicted'] = y_val_pred_original
+
+    test_pred_df = test_data.copy()
+    test_pred_df['NEP_Predicted'] = y_test_pred_original
+
+    # 保存预测结果
+    train_pred_df.to_excel(os.path.join(output_dir, 'ann_train_predictions.xlsx'), index=False)
+    val_pred_df.to_excel(os.path.join(output_dir, 'ann_validation_predictions.xlsx'), index=False)
+    test_pred_df.to_excel(os.path.join(output_dir, 'ann_test_predictions.xlsx'), index=False)
+
+    # 绘制实际值与预测值的散点图
+    plt.figure(figsize=(18, 6))
+
+    plt.subplot(1, 3, 1)
+    plt.scatter(train_data['NEP'], y_train_pred_original, alpha=0.5)
+    plt.plot([min(train_data['NEP']), max(train_data['NEP'])],
+             [min(train_data['NEP']), max(train_data['NEP'])], 'r--')
+    plt.title('训练集: 实际值 vs 预测值')
+    plt.xlabel('实际值')
+    plt.ylabel('预测值')
+    plt.text(0.05, 0.95, f"R² = {train_metrics['R²']:.4f}", transform=plt.gca().transAxes)
+
+    plt.subplot(1, 3, 2)
+    plt.scatter(val_data['NEP'], y_val_pred_original, alpha=0.5)
+    plt.plot([min(val_data['NEP']), max(val_data['NEP'])],
+             [min(val_data['NEP']), max(val_data['NEP'])], 'r--')
+    plt.title('验证集: 实际值 vs 预测值')
+    plt.xlabel('实际值')
+    plt.ylabel('预测值')
+    plt.text(0.05, 0.95, f"R² = {val_metrics['R²']:.4f}", transform=plt.gca().transAxes)
+
+    plt.subplot(1, 3, 3)
+    plt.scatter(test_data['NEP'], y_test_pred_original, alpha=0.5)
+    plt.plot([min(test_data['NEP']), max(test_data['NEP'])],
+             [min(test_data['NEP']), max(test_data['NEP'])], 'r--')
+    plt.title('测试集: 实际值 vs 预测值')
+    plt.xlabel('实际值')
+    plt.ylabel('预测值')
+    plt.text(0.05, 0.95, f"R² = {test_metrics['R²']:.4f}", transform=plt.gca().transAxes)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'ann_prediction_scatter.png'))
+    plt.close()
+
+    # 尝试绘制Optuna优化历史，但不使用TFKerasPruningCallback相关功能
+    optuna_vis_file = os.path.join(output_dir, 'optuna_optimization_history.png')
+    try:
+        from optuna.visualization import plot_optimization_history
+        fig = plot_optimization_history(study)
+        fig.write_image(optuna_vis_file)
+        print(f"Optuna优化历史已保存到: {optuna_vis_file}")
+    except Exception as e:
+        print(f"无法保存Optuna可视化: {e}")
+
+    # 绘制参数重要性
+    param_importance_file = os.path.join(output_dir, 'optuna_param_importance.png')
+    try:
+        from optuna.visualization import plot_param_importances
+        fig = plot_param_importances(study)
+        fig.write_image(param_importance_file)
+        print(f"参数重要性已保存到: {param_importance_file}")
+    except Exception as e:
+        print(f"无法保存参数重要性可视化: {e}")
+
+    print(f"\n所有结果已保存到: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
