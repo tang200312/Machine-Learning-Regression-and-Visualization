@@ -1,0 +1,480 @@
+import os
+import warnings
+import pickle
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import shap
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import logging
+from datetime import datetime
+import json
+from pathlib import Path
+import joblib
+
+warnings.filterwarnings('ignore')
+
+# 设置Times New Roman字体，非加粗，字体增大4号
+plt.rcParams.update({
+    'font.family': 'Times New Roman',
+    'font.weight': 'normal',
+    'axes.labelweight': 'normal',
+    'axes.titleweight': 'normal',
+    'figure.titleweight': 'normal',
+    'font.size': 16,  # 从12增大到16
+    'axes.labelsize': 16,  # 从12增大到16
+    'axes.titlesize': 18,  # 从14增大到18
+    'xtick.labelsize': 14,  # 从10增大到14
+    'ytick.labelsize': 14,  # 从10增大到14
+    'legend.fontsize': 15,  # 从11增大到15
+    'figure.titlesize': 20,  # 从16增大到20
+    'figure.dpi': 300,
+    'savefig.dpi': 300,
+    'savefig.format': 'tiff',
+    'savefig.bbox': 'tight',
+    'axes.unicode_minus': False
+})
+
+
+class RFSHAPAnalyzer:
+    def __init__(self, model_path: str, data_path: str = None, target_column: str = 'NEP',
+                 feature_columns: list = None, output_dir: str = None):
+        self.model_path = model_path
+        self.data_path = data_path
+        self.target_column = target_column
+        # 修改标签：SD改为WD，SP改为WS
+        self.feature_columns = feature_columns or [
+            "TA", "RH", "P", "WS", "WD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"
+        ]
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.output_dir = output_dir or f"RF_SHAP_Analysis_{timestamp}"
+
+        # 创建输出目录
+        for directory in [self.output_dir, f"{self.output_dir}/figures",
+                          f"{self.output_dir}/data", f"{self.output_dir}/reports"]:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+
+        # 设置日志
+        logging.basicConfig(level=logging.INFO,
+                            format='%(asctime)s - %(levelname)s - %(message)s',
+                            handlers=[logging.FileHandler(f"{self.output_dir}/analysis.log", encoding='utf-8'),
+                                      logging.StreamHandler()])
+        self.logger = logging.getLogger(__name__)
+
+        self.model = None
+        self.X_train = self.X_val = self.X_test = None
+        self.y_train = self.y_val = self.y_test = None
+        self.explainer = self.shap_values = self.X_shap = None
+
+    def load_model(self):
+        try:
+            self.logger.info(f"加载RF模型: {self.model_path}")
+            try:
+                with open(self.model_path, 'rb') as f:
+                    self.model = pickle.load(f)
+            except:
+                self.model = joblib.load(self.model_path)
+            self.logger.info("模型加载成功")
+            return True
+        except Exception as e:
+            self.logger.error(f"模型加载失败: {e}")
+            return False
+
+    def create_synthetic_data(self, total_samples: int = 35088):
+        try:
+            np.random.seed(42)
+            feature_ranges = {
+                "TA": (5, 35), "RH": (20, 95), "P": (900, 1100), "WS": (0, 1000),
+                "WD": (0, 12), "ATM": (0, 50), "PAR": (0, 2000), "TS": (0, 30),
+                "shallow_SWC": (0.1, 0.5), "deep_SWC": (0.1, 0.6)
+            }
+
+            data = {}
+            for feature, (min_val, max_val) in feature_ranges.items():
+                if feature in ["TA", "RH", "P"]:
+                    mean_val = (min_val + max_val) / 2
+                    std_val = (max_val - min_val) / 6
+                    data[feature] = np.clip(np.random.normal(mean_val, std_val, total_samples), min_val, max_val)
+                else:
+                    data[feature] = np.random.uniform(min_val, max_val, total_samples)
+
+            # 创建目标变量
+            nep = (0.3 * data["TA"] + 0.2 * data["PAR"] / 100 + 0.15 * data["shallow_SWC"] * 10 +
+                   0.1 * data["RH"] / 10 + 0.05 * data["TS"] + np.random.normal(0, 0.5, total_samples))
+            data["NEP"] = nep
+
+            df = pd.DataFrame(data).sample(frac=1, random_state=42).reset_index(drop=True)
+
+            # 分割数据集
+            self.X_train = df[self.feature_columns].iloc[:21888]
+            self.y_train = df[self.target_column].iloc[:21888]
+            self.X_val = df[self.feature_columns].iloc[21888:29232]
+            self.y_val = df[self.target_column].iloc[21888:29232]
+            self.X_test = df[self.feature_columns].iloc[29232:35088]
+            self.y_test = df[self.target_column].iloc[29232:35088]
+
+            df.to_csv(f"{self.output_dir}/data/synthetic_dataset.csv", index=False)
+            self.logger.info(
+                f"数据集创建完成: 训练集{len(self.X_train)}, 验证集{len(self.X_val)}, 测试集{len(self.X_test)}")
+            return True
+        except Exception as e:
+            self.logger.error(f"数据创建失败: {e}")
+            return False
+
+    def load_data(self):
+        if self.data_path and os.path.exists(self.data_path):
+            try:
+                data = pd.read_excel(self.data_path) if self.data_path.endswith('.xlsx') else pd.read_csv(
+                    self.data_path)
+                X = data[self.feature_columns].fillna(data[self.feature_columns].mean()).astype(float)
+                y = data[self.target_column].astype(float)
+
+                # 按比例分割数据
+                total_samples = len(X)
+                test_ratio = 5856 / total_samples
+                X_temp, self.X_test, y_temp, self.y_test = train_test_split(X, y, test_size=test_ratio, random_state=42)
+
+                train_ratio = 21888 / (21888 + 7344)
+                self.X_train, self.X_val, self.y_train, self.y_val = train_test_split(
+                    X_temp, y_temp, test_size=1 - train_ratio, random_state=42)
+
+                self.logger.info(
+                    f"真实数据加载完成: 训练集{len(self.X_train)}, 验证集{len(self.X_val)}, 测试集{len(self.X_test)}")
+                return True
+            except Exception as e:
+                self.logger.error(f"真实数据加载失败: {e}")
+                return False
+        else:
+            return self.create_synthetic_data()
+
+    def create_shap_explainer(self):
+        try:
+            self.explainer = shap.TreeExplainer(self.model)
+            self.logger.info("SHAP解释器创建成功")
+            return True
+        except Exception as e:
+            self.logger.error(f"SHAP解释器创建失败: {e}")
+            return False
+
+    def calculate_shap_values(self):
+        try:
+            self.logger.info(f"计算测试集所有{len(self.X_test)}个样本的SHAP值...")
+            self.X_shap = self.X_test.copy()
+
+            # 分批计算SHAP值
+            batch_size = 500
+            shap_values_list = []
+            for i in range(0, len(self.X_shap), batch_size):
+                batch = self.X_shap.iloc[i:i + batch_size]
+                batch_shap = self.explainer.shap_values(batch.values)
+                shap_values_list.append(batch_shap)
+
+            self.shap_values = np.vstack(shap_values_list)
+
+            # 保存SHAP值
+            shap_df = pd.DataFrame(self.shap_values, columns=self.feature_columns)
+            shap_df.to_csv(f"{self.output_dir}/data/shap_values.csv", index=False)
+
+            self.logger.info("SHAP值计算完成")
+            return True
+        except Exception as e:
+            self.logger.error(f"SHAP值计算失败: {e}")
+            return False
+
+    def create_visualizations(self):
+        try:
+            self._create_summary_plot()
+            self._create_feature_importance_plot()
+            self._create_rf_builtin_importance_plot()
+            self._create_waterfall_plot()
+            self._create_dependence_plots()
+            self.logger.info("所有可视化图表创建完成")
+            return True
+        except Exception as e:
+            self.logger.error(f"可视化创建失败: {e}")
+            return False
+
+    def _create_summary_plot(self):
+        try:
+            # SHAP汇总图
+            plt.figure(figsize=(14, 10))
+            shap.summary_plot(self.shap_values, self.X_shap, feature_names=self.feature_columns, show=False)
+            plt.title('SHAP Summary Plot - Random Forest Model', fontsize=20, pad=20)
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/shap_summary_plot.tif", dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # 特征重要性条形图
+            plt.figure(figsize=(12, 8))
+            shap.summary_plot(self.shap_values, self.X_shap, feature_names=self.feature_columns,
+                              plot_type="bar", show=False)
+            plt.title('SHAP Feature Importance - Random Forest Model', fontsize=20, pad=20)
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/shap_feature_importance.tif", dpi=300, bbox_inches='tight')
+            plt.close()
+            self.logger.info("SHAP汇总图创建完成")
+        except Exception as e:
+            self.logger.error(f"汇总图创建失败: {e}")
+
+    def _create_feature_importance_plot(self):
+        try:
+            shap_importance = np.abs(self.shap_values).mean(axis=0)
+            indices = np.argsort(shap_importance)[::-1]
+
+            plt.figure(figsize=(14, 10))
+            bars = plt.bar(range(len(shap_importance)), shap_importance[indices],
+                           color='lightcoral', alpha=0.8, edgecolor='black', linewidth=0.5)
+            plt.title('SHAP Feature Importance - Random Forest Model', fontsize=20)
+            plt.xlabel('Features', fontsize=16)
+            plt.ylabel('Mean |SHAP value|', fontsize=16)
+            plt.xticks(range(len(self.feature_columns)),
+                       [self.feature_columns[i] for i in indices], rotation=45, ha='right')
+
+            # 添加数字标签
+            for i, v in enumerate(shap_importance[indices]):
+                plt.text(i, v + max(shap_importance) * 0.01, f'{v:.3f}',
+                         ha='center', va='bottom', fontsize=12)
+
+            plt.grid(axis='y', alpha=0.3, linestyle='--')
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/rf_shap_feature_importance.tif", dpi=300, bbox_inches='tight')
+            plt.close()
+            self.logger.info("SHAP特征重要性图创建完成")
+        except Exception as e:
+            self.logger.error(f"特征重要性图创建失败: {e}")
+
+    def _create_rf_builtin_importance_plot(self):
+        try:
+            if hasattr(self.model, 'feature_importances_'):
+                rf_importance = self.model.feature_importances_
+
+                # 保存数据
+                rf_importance_df = pd.DataFrame({
+                    'Feature': self.feature_columns,
+                    'RF_Builtin_Importance': rf_importance
+                }).sort_values('RF_Builtin_Importance', ascending=False)
+                rf_importance_df.to_csv(f"{self.output_dir}/data/rf_builtin_feature_importance.csv", index=False)
+
+                # RF内置重要性图
+                plt.figure(figsize=(14, 10))
+                indices = np.argsort(rf_importance)[::-1]
+                bars = plt.bar(range(len(rf_importance)), rf_importance[indices],
+                               color='steelblue', alpha=0.8, edgecolor='black', linewidth=0.5)
+                plt.title('Random Forest Built-in Global Feature Importance', fontsize=20, pad=20)
+                plt.xlabel('Features', fontsize=16)
+                plt.ylabel('Feature Importance', fontsize=16)
+                plt.xticks(range(len(self.feature_columns)),
+                           [self.feature_columns[i] for i in indices], rotation=45, ha='right')
+
+                # 添加数字标签
+                for i, v in enumerate(rf_importance[indices]):
+                    plt.text(i, v + max(rf_importance) * 0.01, f'{v:.3f}',
+                             ha='center', va='bottom', fontsize=12)
+
+                plt.grid(axis='y', alpha=0.3, linestyle='--')
+                plt.tight_layout()
+                plt.savefig(f"{self.output_dir}/figures/rf_builtin_global_feature_importance.tif",
+                            dpi=300, bbox_inches='tight')
+                plt.close()
+
+                # 对比图
+                self._create_importance_comparison_plot(rf_importance)
+                self.logger.info("RF内置重要性图创建完成")
+        except Exception as e:
+            self.logger.error(f"RF内置重要性图创建失败: {e}")
+
+    def _create_importance_comparison_plot(self, rf_importance):
+        try:
+            shap_importance = np.abs(self.shap_values).mean(axis=0)
+
+            # 对比图 - 增大图形尺寸以适应更大字体
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
+
+            # 左图：SHAP重要性
+            indices_shap = np.argsort(shap_importance)[::-1]
+            bars1 = ax1.bar(range(len(shap_importance)), shap_importance[indices_shap],
+                            color='lightcoral', alpha=0.8, edgecolor='black', linewidth=0.5)
+            ax1.set_title('SHAP Feature Importance', fontsize=18)
+            ax1.set_xlabel('Features', fontsize=16)
+            ax1.set_ylabel('Mean |SHAP value|', fontsize=16)
+            ax1.set_xticks(range(len(self.feature_columns)))
+            ax1.set_xticklabels([self.feature_columns[i] for i in indices_shap],
+                                rotation=45, ha='right', fontsize=14)
+            ax1.grid(axis='y', alpha=0.3, linestyle='--')
+
+            # 添加数字标签到左图
+            for i, v in enumerate(shap_importance[indices_shap]):
+                ax1.text(i, v + max(shap_importance) * 0.01, f'{v:.3f}',
+                         ha='center', va='bottom', fontsize=11)
+
+            # 右图：RF内置重要性
+            indices_rf = np.argsort(rf_importance)[::-1]
+            bars2 = ax2.bar(range(len(rf_importance)), rf_importance[indices_rf],
+                            color='steelblue', alpha=0.8, edgecolor='black', linewidth=0.5)
+            ax2.set_title('RF Built-in Feature Importance', fontsize=18)
+            ax2.set_xlabel('Features', fontsize=16)
+            ax2.set_ylabel('Feature Importance', fontsize=16)
+            ax2.set_xticks(range(len(self.feature_columns)))
+            ax2.set_xticklabels([self.feature_columns[i] for i in indices_rf],
+                                rotation=45, ha='right', fontsize=14)
+            ax2.grid(axis='y', alpha=0.3, linestyle='--')
+
+            # 添加数字标签到右图
+            for i, v in enumerate(rf_importance[indices_rf]):
+                ax2.text(i, v + max(rf_importance) * 0.01, f'{v:.3f}',
+                         ha='center', va='bottom', fontsize=11)
+
+            plt.suptitle('Feature Importance Comparison: SHAP vs RF Built-in', fontsize=20)
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/feature_importance_comparison.tif",
+                        dpi=300, bbox_inches='tight')
+            plt.close()
+
+            self.logger.info("特征重要性对比图创建完成")
+        except Exception as e:
+            self.logger.error(f"对比图创建失败: {e}")
+
+    def _create_waterfall_plot(self):
+        try:
+            sample_idx = 0
+            plt.figure(figsize=(14, 10))
+            shap.waterfall_plot(shap.Explanation(values=self.shap_values[sample_idx],
+                                                 base_values=self.explainer.expected_value,
+                                                 data=self.X_shap.iloc[sample_idx].values,
+                                                 feature_names=self.feature_columns), show=False)
+            plt.title(f'SHAP Waterfall Plot - Sample {sample_idx}', fontsize=20, pad=20)
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/shap_waterfall_plot.tif", dpi=300, bbox_inches='tight')
+            plt.close()
+            self.logger.info("瀑布图创建完成")
+        except Exception as e:
+            self.logger.error(f"瀑布图创建失败: {e}")
+
+    def _create_dependence_plots(self):
+        try:
+            shap_importance = np.abs(self.shap_values).mean(axis=0)
+            top_features = np.argsort(shap_importance)[-3:][::-1]
+
+            for i, feature_idx in enumerate(top_features):
+                plt.figure(figsize=(12, 8))
+                shap.dependence_plot(feature_idx, self.shap_values, self.X_shap,
+                                     feature_names=self.feature_columns, show=False)
+                plt.title(f'SHAP Dependence Plot - {self.feature_columns[feature_idx]}',
+                          fontsize=20, pad=20)
+                plt.tight_layout()
+                plt.savefig(f"{self.output_dir}/figures/shap_dependence_{self.feature_columns[feature_idx]}.tif",
+                            dpi=300, bbox_inches='tight')
+                plt.close()
+            self.logger.info("依赖图创建完成")
+        except Exception as e:
+            self.logger.error(f"依赖图创建失败: {e}")
+
+    def generate_report(self):
+        try:
+            # 计算模型性能
+            y_pred = self.model.predict(self.X_test)
+            mse = mean_squared_error(self.y_test, y_pred)
+            rmse = np.sqrt(mse)
+            mae = mean_absolute_error(self.y_test, y_pred)
+            r2 = r2_score(self.y_test, y_pred)
+
+            # 计算特征重要性
+            shap_importance = np.abs(self.shap_values).mean(axis=0)
+            feature_importance = list(zip(self.feature_columns, shap_importance))
+            feature_importance.sort(key=lambda x: x[1], reverse=True)
+
+            # 生成报告
+            report = {
+                "model_info": {
+                    "model_type": "Random Forest",
+                    "model_path": self.model_path,
+                    "n_estimators": getattr(self.model, 'n_estimators', 'Unknown'),
+                    "max_depth": getattr(self.model, 'max_depth', 'Unknown')
+                },
+                "dataset_info": {
+                    "total_samples": len(self.X_train) + len(self.X_val) + len(self.X_test),
+                    "train_samples": len(self.X_train),
+                    "val_samples": len(self.X_val),
+                    "test_samples": len(self.X_test),
+                    "features": self.feature_columns,
+                    "target": self.target_column
+                },
+                "model_performance": {
+                    "MSE": float(mse),
+                    "RMSE": float(rmse),
+                    "MAE": float(mae),
+                    "R2_Score": float(r2)
+                },
+                "feature_importance": [{"feature": f, "importance": float(imp)} for f, imp in feature_importance],
+                "analysis_timestamp": datetime.now().isoformat(),
+                "output_directory": self.output_dir
+            }
+
+            # 保存JSON报告
+            with open(f"{self.output_dir}/reports/analysis_report.json", 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+
+            # 保存文本报告
+            with open(f"{self.output_dir}/reports/analysis_report.txt", 'w', encoding='utf-8') as f:
+                f.write("RF模型SHAP分析报告\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"分析时间: {report['analysis_timestamp']}\n")
+                f.write(f"模型类型: {report['model_info']['model_type']}\n")
+                f.write(f"模型路径: {report['model_info']['model_path']}\n\n")
+                f.write("模型性能:\n")
+                f.write(f"  MSE: {report['model_performance']['MSE']:.6f}\n")
+                f.write(f"  RMSE: {report['model_performance']['RMSE']:.6f}\n")
+                f.write(f"  MAE: {report['model_performance']['MAE']:.6f}\n")
+                f.write(f"  R²: {report['model_performance']['R2_Score']:.6f}\n\n")
+                f.write("特征重要性排序:\n")
+                for i, item in enumerate(report['feature_importance'], 1):
+                    f.write(f"  {i}. {item['feature']}: {item['importance']:.6f}\n")
+
+            self.logger.info("分析报告生成完成")
+            return True
+        except Exception as e:
+            self.logger.error(f"报告生成失败: {e}")
+            return False
+
+    def run_analysis(self):
+        """运行完整分析流程"""
+        steps = [
+            ("加载模型", self.load_model),
+            ("加载数据", self.load_data),
+            ("创建SHAP解释器", self.create_shap_explainer),
+            ("计算SHAP值", self.calculate_shap_values),
+            ("创建可视化", self.create_visualizations),
+            ("生成报告", self.generate_report)
+        ]
+
+        for step_name, step_func in steps:
+            self.logger.info(f"开始执行: {step_name}")
+            if not step_func():
+                self.logger.error(f"步骤失败: {step_name}")
+                return False
+            self.logger.info(f"完成: {step_name}")
+
+        self.logger.info("RF SHAP分析完成!")
+        return True
+
+
+def main():
+    # 配置参数
+    model_path = "F:/Machine leaning_SHAP/RF_shap/RF精调/best_rf_model.pkl"
+
+    # 修改特征列名：SD改为WD，SP改为WS
+    feature_columns = ["TA", "RH", "P", "WS", "WD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+
+    # 创建分析器并运行分析
+    analyzer = RFSHAPAnalyzer(
+        model_path=model_path,
+        feature_columns=feature_columns
+    )
+
+    analyzer.run_analysis()
+
+
+if __name__ == "__main__":
+    main()
