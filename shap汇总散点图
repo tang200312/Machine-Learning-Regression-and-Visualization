@@ -28,15 +28,9 @@ shap_data_path = r"F:\Machine leaning_SHAP\TabNet\date_shap\shap_data.npz"
 print("=" * 60)
 print("SHAP可视化 - 仅绘图模式（使用预计算的SHAP值）")
 print("=" * 60)
-# 检查SHAP数据文件是否存在
-if not os.path.exists(shap_data_path):
-    print(f"❌ 错误：找不到SHAP数据文件: {shap_data_path}")
-    print("请先运行完整的TabNet_Enhanced_Simplified.py生成SHAP数据")
-    exit()
-# 检查输出目录是否存在，如果不存在则创建
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-    print(f"✅ 创建输出目录: {output_dir}")
+
+
+
 # 加载SHAP数据
 print("正在加载预计算的SHAP数据...")
 try:
@@ -54,14 +48,14 @@ try:
     background_size = int(shap_data_loaded['background_size'])
     shap_size = int(shap_data_loaded['shap_size'])
     
-    print(f"✅ SHAP数据加载成功!")
+    print(f" SHAP数据加载成功!")
     print(f"   - SHAP值矩阵形状: {shap_values_array.shape}")
     print(f"   - 特征数据形状: {shap_data_array.shape}")
     print(f"   - 基准值: {expected_value:.4f}")
     print(f"   - 样本数量: {shap_size}")
     
 except Exception as e:
-    print(f"❌ 加载SHAP数据时出错: {str(e)}")
+    print(f" 加载SHAP数据时出错: {str(e)}")
     exit()
 # 创建带单位的特征名称函数
 def get_feature_name_with_unit(feature_name):
@@ -119,7 +113,7 @@ plt.savefig(os.path.join(output_dir, 'shap_force_plot_single.png'),
 plt.savefig(os.path.join(output_dir, 'shap_force_plot_single.tiff'), 
            dpi=300, bbox_inches='tight', facecolor='white')
 plt.close()
-print("✅ SHAP Force Plot（单样本瀑布图）创建成功")
+print(" SHAP Force Plot（单样本瀑布图）创建成功")
 # 如果需要多样本的force plot，使用HTML格式
 print("\n=== 创建多样本SHAP Force Plot（HTML格式） ===")
 # 选择前100个样本用于HTML force plot
@@ -134,7 +128,7 @@ force_plot_html = shap.force_plot(
 )
 # 保存HTML force plot
 shap.save_html(os.path.join(output_dir, 'shap_force_plot_multi.html'), force_plot_html)
-print("✅ 多样本SHAP Force Plot（HTML格式）创建成功")
+print(" 多样本SHAP Force Plot（HTML格式）创建成功")
 # ==================== 2. 2000个样本的综合力图 ====================
 print("\n=== 创建2000个样本的综合力图 ===")
 # 限制样本数量为2000个（如果数据量更大的话）
@@ -211,7 +205,7 @@ plt.savefig(os.path.join(output_dir, 'shap_force_plot_comprehensive_v2.png'),
 plt.savefig(os.path.join(output_dir, 'shap_force_plot_comprehensive_v2.tiff'), 
            dpi=300, bbox_inches='tight', facecolor='white')
 plt.close()
-print("✅ 2000个样本的综合力图创建成功")
+print(" 2000个样本的综合力图创建成功")
 # ==================== 3. Beeswarm Plot（蜂群图） ====================
 print("\n=== 创建Beeswarm Plot（蜂群图） ===")
 # 创建Beeswarm Plot
@@ -264,7 +258,7 @@ plt.tight_layout()
 plt.savefig(os.path.join(output_dir, 'shap_beeswarm_plot_v2.png'), dpi=300, bbox_inches='tight')
 plt.savefig(os.path.join(output_dir, 'shap_beeswarm_plot_v2.tiff'), dpi=300, bbox_inches='tight')
 plt.close()
-print("✅ Beeswarm Plot（蜂群图）创建成功")
+print(" Beeswarm Plot（蜂群图）创建成功")
 print("\n" + "=" * 60)
 print("SHAP可视化完成！")
 print("=" * 60)
