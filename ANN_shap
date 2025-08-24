@@ -1,0 +1,459 @@
+import os
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import shap
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import logging
+from datetime import datetime
+import json
+from pathlib import Path
+
+warnings.filterwarnings('ignore')
+
+# 设置Times New Roman字体，非加粗
+plt.rcParams.update({
+    'font.family': 'Times New Roman',
+    'font.weight': 'normal',
+    'axes.labelweight': 'normal',
+    'axes.titleweight': 'normal',
+    'figure.titleweight': 'normal',
+    'font.size': 16,
+    'axes.labelsize': 16,
+    'axes.titlesize': 18,
+    'xtick.labelsize': 14,
+    'ytick.labelsize': 14,
+    'legend.fontsize': 15,
+    'figure.titlesize': 20,
+    'figure.dpi': 300,
+    'savefig.dpi': 300,
+    'savefig.format': 'tiff',
+    'savefig.bbox': 'tight',
+    'axes.unicode_minus': False
+})
+
+
+class ANNSHAPAnalyzer:
+    def __init__(self, model_path: str, data_path: str = None, target_column: str = 'NEP',
+                 feature_columns: list = None, output_dir: str = None):
+        self.model_path = model_path
+        self.data_path = data_path
+        self.target_column = target_column
+        # 修改标签：SD改为WD，SP改为WS
+        self.feature_columns = feature_columns or [
+            "TA", "RH", "P", "WS", "WD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"
+        ]
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.output_dir = output_dir or f"ANN_SHAP_Analysis_{timestamp}"
+
+        # 创建输出目录
+        for directory in [self.output_dir, f"{self.output_dir}/figures",
+                          f"{self.output_dir}/data", f"{self.output_dir}/reports"]:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+
+        # 设置日志
+        logging.basicConfig(level=logging.INFO,
+                            format='%(asctime)s - %(levelname)s - %(message)s',
+                            handlers=[logging.FileHandler(f"{self.output_dir}/analysis.log", encoding='utf-8'),
+                                      logging.StreamHandler()])
+        self.logger = logging.getLogger(__name__)
+
+        self.model = None
+        self.scaler = None
+        self.X_train = self.X_val = self.X_test = None
+        self.y_train = self.y_val = self.y_test = None
+        self.explainer = self.shap_values = self.X_shap = None
+
+    def load_model(self):
+        try:
+            self.logger.info(f"Loading ANN model: {self.model_path}")
+            import tensorflow as tf
+
+            # 尝试使用自定义对象加载模型
+            try:
+                # 定义自定义对象映射来解决版本兼容性问题
+                custom_objects = {
+                    'mse': tf.keras.losses.MeanSquaredError(),
+                    'mae': tf.keras.losses.MeanAbsoluteError(),
+                    'mean_squared_error': tf.keras.losses.MeanSquaredError(),
+                    'mean_absolute_error': tf.keras.losses.MeanAbsoluteError()
+                }
+                self.model = tf.keras.models.load_model(self.model_path, custom_objects=custom_objects)
+                self.logger.info("Model loaded successfully with custom objects")
+            except Exception as e1:
+                self.logger.warning(f"Failed to load with custom objects: {e1}")
+                # 尝试编译=False的方式加载
+                try:
+                    self.model = tf.keras.models.load_model(self.model_path, compile=False)
+                    # 手动重新编译模型
+                    self.model.compile(
+                        optimizer='adam',
+                        loss='mse',
+                        metrics=['mae']
+                    )
+                    self.logger.info("Model loaded successfully without compilation and recompiled")
+                except Exception as e2:
+                    self.logger.error(f"Failed to load without compilation: {e2}")
+                    raise e2
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Model loading failed: {e}")
+            return False
+
+    def create_synthetic_data(self, total_samples: int = 35088):
+        try:
+            np.random.seed(42)
+            feature_ranges = {
+                "TA": (5, 35), "RH": (20, 95), "P": (900, 1100), "WS": (0, 1000),
+                "WD": (0, 12), "ATM": (0, 50), "PAR": (0, 2000), "TS": (0, 30),
+                "shallow_SWC": (0.1, 0.5), "deep_SWC": (0.1, 0.6)
+            }
+
+            data = {}
+            for feature, (min_val, max_val) in feature_ranges.items():
+                if feature in ["TA", "RH", "P"]:
+                    mean_val = (min_val + max_val) / 2
+                    std_val = (max_val - min_val) / 6
+                    data[feature] = np.clip(np.random.normal(mean_val, std_val, total_samples), min_val, max_val)
+                else:
+                    data[feature] = np.random.uniform(min_val, max_val, total_samples)
+
+            # 创建目标变量
+            nep = (0.3 * data["TA"] + 0.2 * data["PAR"] / 100 + 0.15 * data["shallow_SWC"] * 10 +
+                   0.1 * data["RH"] / 10 + 0.05 * data["TS"] + np.random.normal(0, 0.5, total_samples))
+            data["NEP"] = nep
+
+            df = pd.DataFrame(data).sample(frac=1, random_state=42).reset_index(drop=True)
+
+            # 分割数据集
+            X_train_raw = df[self.feature_columns].iloc[:21888]
+            y_train_raw = df[self.target_column].iloc[:21888]
+            X_val_raw = df[self.feature_columns].iloc[21888:29232]
+            y_val_raw = df[self.target_column].iloc[21888:29232]
+            X_test_raw = df[self.feature_columns].iloc[29232:35088]
+            y_test_raw = df[self.target_column].iloc[29232:35088]
+
+            # 数据标准化（ANN需要）
+            self.scaler = StandardScaler()
+            self.X_train = pd.DataFrame(self.scaler.fit_transform(X_train_raw),
+                                        columns=self.feature_columns, index=X_train_raw.index)
+            self.X_val = pd.DataFrame(self.scaler.transform(X_val_raw),
+                                      columns=self.feature_columns, index=X_val_raw.index)
+            self.X_test = pd.DataFrame(self.scaler.transform(X_test_raw),
+                                       columns=self.feature_columns, index=X_test_raw.index)
+
+            self.y_train = y_train_raw
+            self.y_val = y_val_raw
+            self.y_test = y_test_raw
+
+            df.to_csv(f"{self.output_dir}/data/synthetic_dataset.csv", index=False)
+            self.logger.info(f"Dataset created: Train{len(self.X_train)}, Val{len(self.X_val)}, Test{len(self.X_test)}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Data creation failed: {e}")
+            return False
+
+    def load_data(self):
+        if self.data_path and os.path.exists(self.data_path):
+            try:
+                data = pd.read_excel(self.data_path) if self.data_path.endswith('.xlsx') else pd.read_csv(
+                    self.data_path)
+                X = data[self.feature_columns].fillna(data[self.feature_columns].mean()).astype(float)
+                y = data[self.target_column].astype(float)
+
+                # 按比例分割数据
+                total_samples = len(X)
+                test_ratio = 5856 / total_samples
+                X_temp, X_test_raw, y_temp, y_test_raw = train_test_split(X, y, test_size=test_ratio, random_state=42)
+
+                train_ratio = 21888 / (21888 + 7344)
+                X_train_raw, X_val_raw, y_train_raw, y_val_raw = train_test_split(
+                    X_temp, y_temp, test_size=1 - train_ratio, random_state=42)
+
+                # 数据标准化
+                self.scaler = StandardScaler()
+                self.X_train = pd.DataFrame(self.scaler.fit_transform(X_train_raw),
+                                            columns=self.feature_columns, index=X_train_raw.index)
+                self.X_val = pd.DataFrame(self.scaler.transform(X_val_raw),
+                                          columns=self.feature_columns, index=X_val_raw.index)
+                self.X_test = pd.DataFrame(self.scaler.transform(X_test_raw),
+                                           columns=self.feature_columns, index=X_test_raw.index)
+
+                self.y_train = y_train_raw
+                self.y_val = y_val_raw
+                self.y_test = y_test_raw
+
+                self.logger.info(
+                    f"Real data loaded: Train{len(self.X_train)}, Val{len(self.X_val)}, Test{len(self.X_test)}")
+                return True
+            except Exception as e:
+                self.logger.error(f"Real data loading failed: {e}")
+                return False
+        else:
+            return self.create_synthetic_data()
+
+    def create_shap_explainer(self):
+        try:
+            # 为ANN使用DeepExplainer或KernelExplainer
+            try:
+                background_samples = min(100, len(self.X_train))
+                background = self.X_train.sample(n=background_samples, random_state=42)
+                self.explainer = shap.DeepExplainer(self.model, background.values)
+                self.logger.info("SHAP DeepExplainer created successfully")
+            except:
+                background_samples = min(100, len(self.X_train))
+                background = self.X_train.sample(n=background_samples, random_state=42)
+                self.explainer = shap.KernelExplainer(self.model.predict, background.values)
+                self.logger.info("SHAP KernelExplainer created successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"SHAP explainer creation failed: {e}")
+            return False
+
+    def calculate_shap_values(self):
+        try:
+            # 计算测试集所有样本的SHAP值
+            self.logger.info(f"Calculating SHAP values for all {len(self.X_test)} test samples...")
+            self.X_shap = self.X_test.copy()
+
+            # 分批计算SHAP值
+            batch_size = 200  # ANN计算较慢，使用较小批次
+            shap_values_list = []
+
+            for i in range(0, len(self.X_shap), batch_size):
+                batch = self.X_shap.iloc[i:i + batch_size]
+                batch_shap = self.explainer.shap_values(batch.values)
+
+                # 处理可能的多维数组问题
+                if isinstance(batch_shap, list):
+                    batch_shap = batch_shap[0]
+                if len(batch_shap.shape) == 3:
+                    batch_shap = batch_shap.reshape(batch_shap.shape[0], -1)
+
+                shap_values_list.append(batch_shap)
+
+            self.shap_values = np.vstack(shap_values_list)
+
+            # 保存SHAP值
+            shap_df = pd.DataFrame(self.shap_values, columns=self.feature_columns)
+            shap_df.to_csv(f"{self.output_dir}/data/shap_values.csv", index=False)
+
+            self.logger.info("SHAP values calculation completed")
+            return True
+        except Exception as e:
+            self.logger.error(f"SHAP values calculation failed: {e}")
+            return False
+
+    def create_visualizations(self):
+        try:
+            self._create_summary_plot()
+            self._create_feature_importance_plot()
+            self._create_waterfall_plot()
+            self._create_dependence_plots()
+            self.logger.info("All visualizations created successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Visualization creation failed: {e}")
+            return False
+
+    def _create_summary_plot(self):
+        try:
+            # SHAP Summary Plot
+            plt.figure(figsize=(14, 10))
+            shap.summary_plot(self.shap_values, self.X_shap, feature_names=self.feature_columns, show=False)
+            plt.title('SHAP Summary Plot - ANN Model', fontsize=20, pad=20)
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/shap_summary_plot.tif", dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Feature Importance Bar Plot
+            plt.figure(figsize=(12, 8))
+            shap.summary_plot(self.shap_values, self.X_shap, feature_names=self.feature_columns,
+                              plot_type="bar", show=False)
+            plt.title('SHAP Feature Importance - ANN Model', fontsize=20, pad=20)
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/shap_feature_importance.tif", dpi=300, bbox_inches='tight')
+            plt.close()
+            self.logger.info("Summary plots created")
+        except Exception as e:
+            self.logger.error(f"Summary plot creation failed: {e}")
+
+    def _create_feature_importance_plot(self):
+        try:
+            shap_importance = np.abs(self.shap_values).mean(axis=0)
+            indices = np.argsort(shap_importance)[::-1]
+
+            plt.figure(figsize=(14, 10))
+            bars = plt.bar(range(len(shap_importance)), shap_importance[indices],
+                           color='lightcoral', alpha=0.8, edgecolor='black', linewidth=0.5)
+            plt.title('SHAP Feature Importance - ANN Model', fontsize=20)
+            plt.xlabel('Features', fontsize=16)
+            plt.ylabel('Mean |SHAP value|', fontsize=16)
+            plt.xticks(range(len(self.feature_columns)),
+                       [self.feature_columns[i] for i in indices], rotation=45, ha='right')
+
+            # 添加数字标签
+            for i, v in enumerate(shap_importance[indices]):
+                plt.text(i, v + max(shap_importance) * 0.01, f'{v:.3f}',
+                         ha='center', va='bottom', fontsize=12)
+
+            plt.grid(axis='y', alpha=0.3, linestyle='--')
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/ann_shap_feature_importance.tif", dpi=300, bbox_inches='tight')
+            plt.close()
+            self.logger.info("Feature importance plot created")
+        except Exception as e:
+            self.logger.error(f"Feature importance plot creation failed: {e}")
+
+    def _create_waterfall_plot(self):
+        try:
+            sample_idx = 0
+            plt.figure(figsize=(14, 10))
+
+            # 获取基准值
+            if hasattr(self.explainer, 'expected_value'):
+                expected_value = self.explainer.expected_value
+            else:
+                expected_value = np.mean(self.y_train)
+
+            shap.waterfall_plot(shap.Explanation(values=self.shap_values[sample_idx],
+                                                 base_values=expected_value,
+                                                 data=self.X_shap.iloc[sample_idx].values,
+                                                 feature_names=self.feature_columns), show=False)
+            plt.title(f'SHAP Waterfall Plot - Sample {sample_idx}', fontsize=20, pad=20)
+            plt.tight_layout()
+            plt.savefig(f"{self.output_dir}/figures/shap_waterfall_plot.tif", dpi=300, bbox_inches='tight')
+            plt.close()
+            self.logger.info("Waterfall plot created")
+        except Exception as e:
+            self.logger.error(f"Waterfall plot creation failed: {e}")
+
+    def _create_dependence_plots(self):
+        try:
+            shap_importance = np.abs(self.shap_values).mean(axis=0)
+            top_features = np.argsort(shap_importance)[-3:][::-1]
+
+            for i, feature_idx in enumerate(top_features):
+                plt.figure(figsize=(12, 8))
+                shap.dependence_plot(feature_idx, self.shap_values, self.X_shap,
+                                     feature_names=self.feature_columns, show=False)
+                plt.title(f'SHAP Dependence Plot - {self.feature_columns[feature_idx]}',
+                          fontsize=20, pad=20)
+                plt.tight_layout()
+                plt.savefig(f"{self.output_dir}/figures/shap_dependence_{self.feature_columns[feature_idx]}.tif",
+                            dpi=300, bbox_inches='tight')
+                plt.close()
+            self.logger.info("Dependence plots created")
+        except Exception as e:
+            self.logger.error(f"Dependence plot creation failed: {e}")
+
+    def generate_report(self):
+        try:
+            # 计算模型性能
+            y_pred = self.model.predict(self.X_test.values).flatten()
+            mse = mean_squared_error(self.y_test, y_pred)
+            rmse = np.sqrt(mse)
+            mae = mean_absolute_error(self.y_test, y_pred)
+            r2 = r2_score(self.y_test, y_pred)
+
+            # 计算特征重要性
+            shap_importance = np.abs(self.shap_values).mean(axis=0)
+            feature_importance = list(zip(self.feature_columns, shap_importance))
+            feature_importance.sort(key=lambda x: x[1], reverse=True)
+
+            # 生成报告
+            report = {
+                "model_info": {
+                    "model_type": "Artificial Neural Network",
+                    "model_path": self.model_path
+                },
+                "dataset_info": {
+                    "total_samples": len(self.X_train) + len(self.X_val) + len(self.X_test),
+                    "train_samples": len(self.X_train),
+                    "val_samples": len(self.X_val),
+                    "test_samples": len(self.X_test),
+                    "features": self.feature_columns,
+                    "target": self.target_column
+                },
+                "model_performance": {
+                    "MSE": float(mse),
+                    "RMSE": float(rmse),
+                    "MAE": float(mae),
+                    "R2_Score": float(r2)
+                },
+                "feature_importance": [{"feature": f, "importance": float(imp)} for f, imp in feature_importance],
+                "analysis_timestamp": datetime.now().isoformat(),
+                "output_directory": self.output_dir
+            }
+
+            # 保存JSON报告
+            with open(f"{self.output_dir}/reports/analysis_report.json", 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+
+            # 保存文本报告
+            with open(f"{self.output_dir}/reports/analysis_report.txt", 'w', encoding='utf-8') as f:
+                f.write("ANN Model SHAP Analysis Report\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"Analysis Time: {report['analysis_timestamp']}\n")
+                f.write(f"Model Type: {report['model_info']['model_type']}\n")
+                f.write(f"Model Path: {report['model_info']['model_path']}\n\n")
+                f.write("Model Performance:\n")
+                f.write(f"  MSE: {report['model_performance']['MSE']:.6f}\n")
+                f.write(f"  RMSE: {report['model_performance']['RMSE']:.6f}\n")
+                f.write(f"  MAE: {report['model_performance']['MAE']:.6f}\n")
+                f.write(f"  R²: {report['model_performance']['R2_Score']:.6f}\n\n")
+                f.write("Feature Importance Ranking:\n")
+                for i, item in enumerate(report['feature_importance'], 1):
+                    f.write(f"  {i}. {item['feature']}: {item['importance']:.6f}\n")
+
+            self.logger.info("Analysis report generated")
+            return True
+        except Exception as e:
+            self.logger.error(f"Report generation failed: {e}")
+            return False
+
+    def run_analysis(self):
+        """运行完整分析流程"""
+        steps = [
+            ("Loading model", self.load_model),
+            ("Loading data", self.load_data),
+            ("Creating SHAP explainer", self.create_shap_explainer),
+            ("Calculating SHAP values", self.calculate_shap_values),
+            ("Creating visualizations", self.create_visualizations),
+            ("Generating report", self.generate_report)
+        ]
+
+        for step_name, step_func in steps:
+            self.logger.info(f"Starting: {step_name}")
+            if not step_func():
+                self.logger.error(f"Step failed: {step_name}")
+                return False
+            self.logger.info(f"Completed: {step_name}")
+
+        self.logger.info("ANN SHAP analysis completed!")
+        return True
+
+
+def main():
+    # 配置参数 - 修改为实际的ANN模型路径
+    model_path = "F:/Machine leaning_SHAP/ANN/ANN精调/best_ann_model.h5"
+
+    # 修改特征列名：SD改为WD，SP改为WS
+    feature_columns = ["TA", "RH", "P", "WS", "WD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+
+    # 创建分析器并运行分析
+    analyzer = ANNSHAPAnalyzer(
+        model_path=model_path,
+        feature_columns=feature_columns
+    )
+
+    analyzer.run_analysis()
+
+
+if __name__ == "__main__":
+    main()
