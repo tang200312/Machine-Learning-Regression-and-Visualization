@@ -1,0 +1,52 @@
+import os
+import pandas as pd
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import openpyxl
+
+# === 原始 Excel 文件路径 ===
+file_path = r"F:\二区深度学习\通量＋气象.xlsx"
+
+# === 加载 Excel 文件和指定工作表 ===
+excel_file = pd.ExcelFile(file_path)
+sheet_names = excel_file.sheet_names
+
+df_ts = excel_file.parse(sheet_names[1])  # TS sheet（第2个）
+df_swc = excel_file.parse(sheet_names[2])  # SWC sheet（第3个）
+
+
+def pca_with_explanation(df, name):
+    df_numeric = df.select_dtypes(include='number')
+
+    # 标准化
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(df_numeric)
+
+    # PCA 拟合
+    pca = PCA()
+    X_pca = pca.fit_transform(X_scaled)
+
+    # 主成分命名
+    pca_columns = [f"PC{i + 1}" for i in range(X_pca.shape[1])]
+    df_pca = pd.DataFrame(X_pca, columns=pca_columns)
+
+    # 解释方差和每个主成分的主要贡献变量
+    print(f"\n==== {name} PCA 主成分解释 ====")
+    for i, (var_ratio, comp) in enumerate(zip(pca.explained_variance_ratio_, pca.components_)):
+        top_index = abs(comp).argmax()
+        top_feature = df_numeric.columns[top_index]
+        print(f"PC{i + 1}: 方差贡献率 = {var_ratio:.4f}，主要代表特征 = {top_feature}")
+
+    return df_pca
+
+
+# === 分别对 TS 和 SWC 做 PCA，并打印说明 ===
+df_ts_pca = pca_with_explanation(df_ts, "TS（土壤温度）")
+df_swc_pca = pca_with_explanation(df_swc, "SWC（土壤含水量）")
+
+# === 写入原 Excel 文件的新 Sheet ===
+with pd.ExcelWriter(file_path, mode='a', engine='openpyxl', if_sheet_exists='replace') as writer:
+    df_ts_pca.to_excel(writer, sheet_name='TS_PCA', index=False)
+    df_swc_pca.to_excel(writer, sheet_name='SWC_PCA', index=False)
+
+print("\n PCA 已完成，结果写入原 Excel 文件的 [TS_PCA] 和 [SWC_PCA] 工作表。")
