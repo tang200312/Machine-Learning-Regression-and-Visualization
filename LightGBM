@@ -4,58 +4,75 @@ import matplotlib.pyplot as plt
 import lightgbm as lgb
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-from sklearn.model_selection import KFold, train_test_split
+from sklearn.model_selection import GridSearchCV, KFold, train_test_split
 import os
 import time
 import joblib
+from tqdm import tqdm
 import itertools
 import optuna
 from optuna.visualization import plot_optimization_history, plot_param_importances
 
-# 创建输出目录
-output_dir = "F:\\Machine leaning_SHAP\\LightGBM\\2"
+# 创建输出目录（如果不存在）
+output_dir = "F:\\Machine leaning_SHAP\\LightGBM\\result"
 os.makedirs(output_dir, exist_ok=True)
 
 # 设置中文显示
-plt.rcParams['font.sans-serif'] = ['SimHei']
-plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
 
-# 读取数据
-print("1. 读取数据")
+# 读取统一数据集
+print("正在读取数据...")
 data = pd.read_excel("F:\\Machine leaning_SHAP\\数据集.xlsx")
-print(f"数据量: {data.shape[0]}行")
+print(f"数据读取完成! 总数据量: {data.shape[0]}行")
 
 # 定义特征和目标变量
 features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
 target = "NEP"
-X, y = data[features], data[target]
 
-# 划分数据集
-print("\n2. 划分数据集")
-X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=5856, random_state=42, shuffle=True)
-X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=7344, random_state=42, shuffle=True)
-print(f"训练集: {X_train.shape[0]} | 验证集: {X_val.shape[0]} | 测试集: {X_test.shape[0]}")
+# 提取特征和目标变量
+X = data[features]
+y = data[target]
+
+# 按指定比例划分数据集：训练集21888条，验证集7344条，测试集5856条
+print("正在划分数据集...")
+# 首先分离出测试集（5856条）
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=5856, random_state=42, shuffle=True
+)
+
+# 然后从剩余数据中分离训练集和验证集
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=7344, random_state=42, shuffle=True
+)
+
+print(f"数据集划分完成!")
+print(f"训练集: {X_train.shape[0]}行")
+print(f"验证集: {X_val.shape[0]}行") 
+print(f"测试集: {X_test.shape[0]}行")
 
 # 数据归一化
-print("\n3. 数据归一化")
+print("正在进行数据归一化...")
 scaler = MinMaxScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_val_scaled = scaler.transform(X_val)
 X_test_scaled = scaler.transform(X_test)
+print("数据归一化完成!")
 
 # 合并训练集和验证集用于交叉验证
 X_train_val = np.vstack((X_train_scaled, X_val_scaled))
 y_train_val = pd.concat([y_train, y_val])
 
-# 网格搜索粗调
-print("\n4. 网格搜索粗调")
+# 使用网格搜索进行粗调
+print("\n" + "="*50)
+print("开始网格搜索粗调...")
 start_time = time.time()
 
-# 定义参数网格
+# 定义参数网格（关键超参数）
 param_grid = {
     'learning_rate': [0.01, 0.05, 0.1],
     'n_estimators': [100, 200, 300],
-    'max_depth': [3, 5, 7, -1],
+    'max_depth': [3, 5, 7, -1],  # -1表示无限制
     'num_leaves': [31, 50, 100],
     'min_child_samples': [20, 30, 50],
     'subsample': [0.8, 0.9, 1.0],
@@ -66,12 +83,39 @@ param_grid = {
 total_combinations = 1
 for param in param_grid.values():
     total_combinations *= len(param)
-print(f"参数组合: {total_combinations} 种 (3折交叉验证)")
+print(f"总共需要评估 {total_combinations} 种参数组合，每种组合进行3折交叉验证")
+print(f"预计总共需要训练 {total_combinations * 3} 个模型")
 
-# 三折交叉验证
+# 定义三折交叉验证
 cv = KFold(n_splits=3, shuffle=True, random_state=42)
 
-# 手动网格搜索
+# 创建自定义的回调函数来显示进度
+class ProgressCallback:
+    def __init__(self, total):
+        self.total = total
+        self.current = 0
+        self.start_time = time.time()
+        
+    def __call__(self, params, score, rank):
+        self.current += 1
+        elapsed_time = time.time() - self.start_time
+        avg_time_per_iter = elapsed_time / self.current if self.current > 0 else 0
+        estimated_remaining = avg_time_per_iter * (self.total - self.current)
+        
+        progress = self.current / self.total * 100
+        print(f"\r进度: [{self.current}/{self.total}] {progress:.1f}% | "  
+              f"已用时间: {elapsed_time:.1f}秒 | "  
+              f"预计剩余: {estimated_remaining:.1f}秒 | "  
+              f"当前得分: {score:.4f}", end="")
+        
+        # 每10个组合或最后一个组合时换行
+        if self.current % 10 == 0 or self.current == self.total:
+            print()
+
+# 创建进度回调
+progress_callback = ProgressCallback(total_combinations)
+
+# 手动执行网格搜索以显示进度
 param_combinations = list(itertools.product(*param_grid.values()))
 best_score = float('-inf')
 best_params = None
@@ -79,8 +123,16 @@ all_results = []
 
 for i, values in enumerate(param_combinations):
     params = dict(zip(param_grid.keys(), values))
-    model = lgb.LGBMRegressor(objective='regression', verbose=-1, random_state=42,** params)
     
+    # 创建模型
+    model = lgb.LGBMRegressor(
+        objective='regression', 
+        verbose=-1, 
+        random_state=42,
+        **params
+    )
+    
+    # 执行交叉验证
     fold_scores = []
     for train_idx, val_idx in cv.split(X_train_val):
         X_fold_train, X_fold_val = X_train_val[train_idx], X_train_val[val_idx]
@@ -88,29 +140,47 @@ for i, values in enumerate(param_combinations):
         
         model.fit(X_fold_train, y_fold_train)
         y_pred = model.predict(X_fold_val)
-        fold_scores.append(-mean_squared_error(y_fold_val, y_pred))  # 负MSE
+        score = -mean_squared_error(y_fold_val, y_pred)  # 负MSE
+        fold_scores.append(score)
     
+    # 计算平均分数
     mean_score = np.mean(fold_scores)
     all_results.append({**params, 'mean_cv_score': mean_score})
     
+    # 更新最佳分数和参数
     if mean_score > best_score:
-        best_score, best_params = mean_score, params
+        best_score = mean_score
+        best_params = params
     
-    # 每10个组合更新一次进度
-    if (i + 1) % 10 == 0 or i + 1 == total_combinations:
-        print(f"进度: {i + 1}/{total_combinations} | 当前最佳MSE: {np.sqrt(-best_score):.4f}")
+    # 更新进度
+    progress_callback(params, mean_score, i+1)
 
-print(f"网格搜索最佳参数: {best_params}")
+# 输出最佳参数
+print("\n网格搜索最佳参数:")
+for param, value in best_params.items():
+    print(f"{param}: {value}")
+print(f"最佳MSE: {-best_score:.4f}")
 print(f"最佳RMSE: {np.sqrt(-best_score):.4f}")
-print(f"耗时: {time.time() - start_time:.2f}秒")
+
+end_time = time.time()
+print(f"网格搜索耗时: {end_time - start_time:.2f}秒")
+print("="*50 + "\n")
 
 # 保存网格搜索结果
-grid_results_df = pd.DataFrame(all_results).sort_values('mean_cv_score', ascending=False)
+grid_results_df = pd.DataFrame(all_results)
+grid_results_df = grid_results_df.sort_values('mean_cv_score', ascending=False)
 grid_results_df.to_excel(os.path.join(output_dir, "LightGBM_网格搜索结果.xlsx"), index=False)
 
-# 网格搜索模型训练与评估
-print("\n5. 网格搜索模型评估")
-grid_model = lgb.LGBMRegressor(objective='regression', verbose=-1, random_state=42,** best_params)
+# 使用网格搜索最佳参数创建模型并训练
+print("使用网格搜索最佳参数训练模型...")
+grid_model = lgb.LGBMRegressor(
+    objective='regression',
+    verbose=-1,
+    random_state=42,
+    **best_params
+)
+
+# 训练模型并记录训练过程
 evals_result_grid = {}
 grid_model.fit(
     X_train_scaled, y_train,
@@ -120,132 +190,284 @@ grid_model.fit(
     callbacks=[lgb.record_evaluation(evals_result_grid)]
 )
 
-# 预测与评估
+# 网格搜索模型预测
 y_train_pred_grid = grid_model.predict(X_train_scaled)
 y_val_pred_grid = grid_model.predict(X_val_scaled)
 y_test_pred_grid = grid_model.predict(X_test_scaled)
 
-
-# 简化评估函数
+# 评估函数
 def evaluate_model(y_true, y_pred, dataset_name):
     r2 = r2_score(y_true, y_pred)
     mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    print(f"{dataset_name}: R²={r2:.4f} | MAE={mae:.4f} | RMSE={rmse:.4f}")
-    return {"R²": r2, "MAE": mae, "RMSE": rmse}
-
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    
+    print(f"{dataset_name} 评估指标:")
+    print(f"R² = {r2:.4f}")
+    print(f"MAE = {mae:.4f}")
+    print(f"MSE = {mse:.4f}")
+    print(f"RMSE = {rmse:.4f}")
+    print("\n")
+    
+    return {
+        "R²": r2,
+        "MAE": mae,
+        "MSE": mse,
+        "RMSE": rmse
+    }
 
 # 评估网格搜索模型
+print("网格搜索模型评估结果:")
 train_metrics_grid = evaluate_model(y_train, y_train_pred_grid, "训练集")
 val_metrics_grid = evaluate_model(y_val, y_val_pred_grid, "验证集")
 test_metrics_grid = evaluate_model(y_test, y_test_pred_grid, "测试集")
 
-# 保存评估指标
+# 保存网格搜索评估指标
 grid_metrics_df = pd.DataFrame({
-    "指标": ["R²", "MAE", "RMSE"],
-    "训练集": [train_metrics_grid["R²"], train_metrics_grid["MAE"], train_metrics_grid["RMSE"]],
-    "验证集": [val_metrics_grid["R²"], val_metrics_grid["MAE"], val_metrics_grid["RMSE"]],
-    "测试集": [test_metrics_grid["R²"], test_metrics_grid["MAE"], test_metrics_grid["RMSE"]]
+    "指标": ["R²", "MAE", "MSE", "RMSE"],
+    "训练集": [train_metrics_grid["R²"], train_metrics_grid["MAE"], train_metrics_grid["MSE"], train_metrics_grid["RMSE"]],
+    "验证集": [val_metrics_grid["R²"], val_metrics_grid["MAE"], val_metrics_grid["MSE"], val_metrics_grid["RMSE"]],
+    "测试集": [test_metrics_grid["R²"], test_metrics_grid["MAE"], test_metrics_grid["MSE"], test_metrics_grid["RMSE"]]
 })
 grid_metrics_df.to_excel(os.path.join(output_dir, "LightGBM_网格搜索_评估指标.xlsx"), index=False)
 
-# Optuna精调
-print("\n6. Optuna精调")
+# 使用Optuna进行精调
+print("\n" + "="*50)
+print("开始Optuna精调...")
 start_time = time.time()
+
+# 定义五折交叉验证
 cv_optuna = KFold(n_splits=5, shuffle=True, random_state=42)
 
-
-# 防过拟合目标函数
-def objective_anti_overfitting(trial):
+# 定义目标函数（全面的参数搜索）
+# 定义目标函数（全面的参数搜索）
+def objective(trial):
+    # Boosting类型（先选择，以便后续参数依赖于此）
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
     
+    # 基础参数
     params = {
-        'objective': 'regression', 'metric': 'rmse', 'verbosity': -1, 'random_state': 42,
+        'objective': 'regression',
+        'metric': 'rmse',
+        'verbosity': -1,
+        'random_state': 42,
         'boosting_type': boosting_type,
-        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.1, log=True),
-        'n_estimators': trial.suggest_int('n_estimators', 50, 500),
-        'max_depth': trial.suggest_int('max_depth', 3, 8),
-        'num_leaves': trial.suggest_int('num_leaves', 10, 100),
-        'min_child_samples': trial.suggest_int('min_child_samples', 20, 200),
-        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 200),
-        'max_bin': trial.suggest_int('max_bin', 100, 300),
-        'min_split_gain': trial.suggest_float('min_split_gain', 0.1, 2.0),
-        'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 50.0, log=True),
-        'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 50.0, log=True),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
-        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 0.9),
-        'bagging_freq': trial.suggest_int('bagging_freq', 1, 5),
+        
+        # 学习参数
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+        
+        # 树结构参数
+        'max_depth': trial.suggest_int('max_depth', 3, 15),
+        'num_leaves': trial.suggest_int('num_leaves', 10, 300),
+        'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 100),
+        'max_bin': trial.suggest_int('max_bin', 100, 500),
+        
+        # 正则化参数（防止过拟合）
+        'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
+        'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 100.0, log=True),
+        'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 100.0, log=True),
+        
+        # 特征采样（所有boosting类型都支持）
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
     }
-
+    
+    # 根据boosting类型调整参数
     if boosting_type == 'dart':
-        params['drop_rate'] = trial.suggest_float('drop_rate', 0.1, 0.5)
-        params['max_drop'] = trial.suggest_int('max_drop', 5, 30)
-        params['skip_drop'] = trial.suggest_float('skip_drop', 0.3, 0.8)
+        # DART特有参数
+        params['drop_rate'] = trial.suggest_float('drop_rate', 0.0, 1.0)
+        params['max_drop'] = trial.suggest_int('max_drop', 1, 50)
+        params['skip_drop'] = trial.suggest_float('skip_drop', 0.0, 1.0)
+        # DART可以使用数据采样
+        params['subsample'] = trial.suggest_float('subsample', 0.5, 1.0)
+        params['subsample_freq'] = trial.suggest_int('subsample_freq', 0, 10)
+        
     elif boosting_type == 'goss':
-        top_rate = trial.suggest_float('top_rate', 0.1, 0.5)
+        # GOSS特有参数，确保 top_rate + other_rate <= 1.0
+        top_rate = trial.suggest_float('top_rate', 0.1, 0.8)
+        other_rate = trial.suggest_float('other_rate', 0.0, 1.0 - top_rate)
         params['top_rate'] = top_rate
-        params['other_rate'] = trial.suggest_float('other_rate', 0.05, 1.0 - top_rate)
-        del params['bagging_fraction'], params['bagging_freq']
-
+        params['other_rate'] = other_rate
+        # GOSS不能使用数据采样参数（subsample, subsample_freq）
+        
+    else:  # gbdt
+        # GBDT可以使用数据采样
+        params['subsample'] = trial.suggest_float('subsample', 0.5, 1.0)
+        params['subsample_freq'] = trial.suggest_int('subsample_freq', 0, 10)
+    
+    # 使用五折交叉验证
     cv_scores = []
     for train_idx, val_idx in cv_optuna.split(X_train_val):
         X_fold_train, X_fold_val = X_train_val[train_idx], X_train_val[val_idx]
         y_fold_train, y_fold_val = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
         
-        model = lgb.LGBMRegressor(** params)
+        model = lgb.LGBMRegressor(**params)
+        
+        # 根据boosting类型决定是否使用早停
         if boosting_type == 'dart':
+            # DART不支持早停，直接训练
             model.fit(X_fold_train, y_fold_train)
             y_pred = model.predict(X_fold_val)
         else:
+            # GBDT和GOSS支持早停
             model.fit(
                 X_fold_train, y_fold_train,
                 eval_set=[(X_fold_val, y_fold_val)],
                 eval_metric='rmse',
-                callbacks=[lgb.early_stopping(30, verbose=False)]
+                callbacks=[lgb.early_stopping(50, verbose=False)]
             )
             y_pred = model.predict(X_fold_val, num_iteration=model.best_iteration_)
-            
-        cv_scores.append(mean_squared_error(y_fold_val, y_pred))
+        
+        mse = mean_squared_error(y_fold_val, y_pred)
+        cv_scores.append(mse)
     
     return np.mean(cv_scores)
 
+# 定义目标函数（增强防过拟合版本）
+def objective_anti_overfitting(trial):
+    # Boosting类型（先选择，以便后续参数依赖于此）
+    boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
+    
+    # 基础参数（更保守的设置）
+    params = {
+        'objective': 'regression',
+        'metric': 'rmse',
+        'verbosity': -1,
+        'random_state': 42,
+        'boosting_type': boosting_type,
+        
+        # 学习参数（降低学习率，减少过拟合）
+        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.1, log=True),  # 降低上限
+        'n_estimators': trial.suggest_int('n_estimators', 50, 500),  # 减少树的数量
+        
+        # 树结构参数（更保守的设置）
+        'max_depth': trial.suggest_int('max_depth', 3, 8),  # 限制树深度
+        'num_leaves': trial.suggest_int('num_leaves', 10, 100),  # 减少叶子数
+        'min_child_samples': trial.suggest_int('min_child_samples', 20, 200),  # 增加最小样本数
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 200),  # 增加叶子最小样本数
+        'max_bin': trial.suggest_int('max_bin', 100, 300),  # 减少分箱数
+        
+        # 强化正则化参数（防止过拟合）
+        'min_split_gain': trial.suggest_float('min_split_gain', 0.1, 2.0),  # 增加分裂增益阈值
+        'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 50.0, log=True),  # 增强L1正则化
+        'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 50.0, log=True),  # 增强L2正则化
+        
+        # 特征和样本采样（增加随机性）
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),  # 减少特征采样
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 0.9),  # 增加样本采样
+        'bagging_freq': trial.suggest_int('bagging_freq', 1, 5),  # 采样频率
+    }
+    
+    # 根据boosting类型调整参数
+    if boosting_type == 'dart':
+        # DART特有参数（增强dropout）
+        params['drop_rate'] = trial.suggest_float('drop_rate', 0.1, 0.5)  # 增加dropout率
+        params['max_drop'] = trial.suggest_int('max_drop', 5, 30)
+        params['skip_drop'] = trial.suggest_float('skip_drop', 0.3, 0.8)
+        
+    elif boosting_type == 'goss':
+        # GOSS特有参数
+        top_rate = trial.suggest_float('top_rate', 0.1, 0.5)  # 更保守的采样
+        other_rate = trial.suggest_float('other_rate', 0.05, min(0.3, 1.0 - top_rate))
+        params['top_rate'] = top_rate
+        params['other_rate'] = other_rate
+        # 移除bagging相关参数（GOSS不兼容）
+        del params['bagging_fraction']
+        del params['bagging_freq']
+    
+    # 使用五折交叉验证
+    cv_scores = []
+    for train_idx, val_idx in cv_optuna.split(X_train_val):
+        X_fold_train, X_fold_val = X_train_val[train_idx], X_train_val[val_idx]
+        y_fold_train, y_fold_val = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
+        
+        model = lgb.LGBMRegressor(**params)
+        
+        # 增强早停策略
+        if boosting_type == 'dart':
+            # DART不支持早停，但可以减少迭代次数
+            model.fit(X_fold_train, y_fold_train)
+            y_pred = model.predict(X_fold_val)
+        else:
+            # 更严格的早停
+            model.fit(
+                X_fold_train, y_fold_train,
+                eval_set=[(X_fold_val, y_fold_val)],
+                eval_metric='rmse',
+                callbacks=[lgb.early_stopping(30, verbose=False)]  # 减少早停轮数
+            )
+            y_pred = model.predict(X_fold_val, num_iteration=model.best_iteration_)
+        
+        mse = mean_squared_error(y_fold_val, y_pred)
+        cv_scores.append(mse)
+    
+    return np.mean(cv_scores)
 
-# 执行优化
+# 创建Optuna研究
 study = optuna.create_study(
     direction='minimize',
     sampler=optuna.samplers.TPESampler(seed=42, multivariate=True, n_startup_trials=50)
 )
+
+# 运行优化（200次实验）
+print(f"开始Optuna优化（防过拟合版本），将进行200次试验，使用5折交叉验证...")
 study.optimize(objective_anti_overfitting, n_trials=200, show_progress_bar=True)
 
-print(f"Optuna最佳参数: {study.best_params}")
+# 输出最佳参数
+print("\nOptuna优化最佳参数:")
+for param, value in study.best_params.items():
+    print(f"{param}: {value}")
+print(f"最佳MSE: {study.best_value:.6f}")
 print(f"最佳RMSE: {np.sqrt(study.best_value):.6f}")
-print(f"耗时: {time.time() - start_time:.2f}秒")
 
-# 保存Optuna结果
+end_time = time.time()
+print(f"Optuna优化耗时: {end_time - start_time:.2f}秒")
+print("="*50 + "\n")
+
+# 保存Optuna优化结果
 optuna_results = pd.DataFrame()
 for trial in study.trials:
-    optuna_results = pd.concat([optuna_results, pd.DataFrame([{**trial.params, 'value': trial.value}])], ignore_index=True)
+    trial_dict = {**trial.params, 'value': trial.value}
+    optuna_results = pd.concat([optuna_results, pd.DataFrame([trial_dict])], ignore_index=True)
+
 optuna_results.to_excel(os.path.join(output_dir, "LightGBM_Optuna优化结果.xlsx"), index=False)
 
-# 可视化Optuna结果
+# 可视化Optuna优化过程
 try:
-    plot_optimization_history(study).write_image(os.path.join(output_dir, "LightGBM_Optuna优化历史.png"))
-    plot_param_importances(study).write_image(os.path.join(output_dir, "LightGBM_Optuna参数重要性.png"))
-    print("Optuna可视化已保存")
+    # 绘制优化历史
+    history_fig = plot_optimization_history(study)
+    history_fig.write_image(os.path.join(output_dir, "LightGBM_Optuna优化历史.png"))
+    
+    # 绘制参数重要性
+    param_importance_fig = plot_param_importances(study)
+    param_importance_fig.write_image(os.path.join(output_dir, "LightGBM_Optuna参数重要性.png"))
+    
+    print("Optuna可视化结果已保存!")
 except Exception as e:
-    print(f"可视化失败: {e}")
+    print(f"Optuna可视化失败: {e}")
 
-# 训练最终模型
-print("\n7. 训练最终模型")
+# 使用Optuna最佳参数创建最终模型
+print("使用Optuna最佳参数训练最终模型...")
 final_params = study.best_params.copy()
+
+# 检查并处理GOSS与bagging参数的冲突
 if final_params.get('boosting_type') == 'goss':
+    # GOSS不能使用bagging相关参数，需要移除
     final_params.pop('bagging_fraction', None)
     final_params.pop('bagging_freq', None)
+    final_params.pop('subsample', None)
+    final_params.pop('subsample_freq', None)
+    print("检测到GOSS boosting类型，已移除不兼容的bagging参数")
 
-final_model = lgb.LGBMRegressor(** final_params)
+final_model = lgb.LGBMRegressor(**final_params)
+
+# 训练最终模型并记录训练过程
 evals_result_optuna = {}
 
+# 根据boosting类型决定是否使用早停
 if final_params.get('boosting_type') == 'dart':
+    # DART不支持早停
     final_model.fit(
         X_train_scaled, y_train,
         eval_set=[(X_train_scaled, y_train), (X_val_scaled, y_val)],
@@ -253,132 +475,220 @@ if final_params.get('boosting_type') == 'dart':
         eval_metric='rmse',
         callbacks=[lgb.record_evaluation(evals_result_optuna)]
     )
+    print("DART模型训练完成（未使用早停）!")
 else:
+    # GBDT和GOSS支持早停
     final_model.fit(
         X_train_scaled, y_train,
         eval_set=[(X_train_scaled, y_train), (X_val_scaled, y_val)],
         eval_names=['训练集', '验证集'],
         eval_metric='rmse',
-        callbacks=[lgb.early_stopping(30, verbose=False), lgb.record_evaluation(evals_result_optuna)]
+        callbacks=[
+            lgb.early_stopping(30, verbose=False),  # 使用更严格的早停
+            lgb.record_evaluation(evals_result_optuna)
+        ]
     )
+    print("Optuna最优模型训练完成!")
 
 # 保存模型
+print("正在保存模型...")
 joblib.dump(grid_model, os.path.join(output_dir, "LightGBM_网格搜索模型.pkl"))
 joblib.dump(final_model, os.path.join(output_dir, "LightGBM_Optuna最优模型.pkl"))
 joblib.dump(scaler, os.path.join(output_dir, "LightGBM_特征缩放器.pkl"))
+print("模型保存完成!")
 
-# 最终模型评估
-print("\n8. 最终模型评估")
+# 使用Optuna最终模型进行预测
+print("\n正在使用Optuna最优模型进行预测...")
 y_train_pred_optuna = final_model.predict(X_train_scaled)
 y_val_pred_optuna = final_model.predict(X_val_scaled)
 y_test_pred_optuna = final_model.predict(X_test_scaled)
+print("预测完成!")
 
+# 评估Optuna最终模型
+print("Optuna最优模型评估结果:")
 train_metrics_optuna = evaluate_model(y_train, y_train_pred_optuna, "训练集")
 val_metrics_optuna = evaluate_model(y_val, y_val_pred_optuna, "验证集")
 test_metrics_optuna = evaluate_model(y_test, y_test_pred_optuna, "测试集")
 
-# 保存评估指标
+# 保存Optuna评估指标
 optuna_metrics_df = pd.DataFrame({
-    "指标": ["R²", "MAE", "RMSE"],
-    "训练集": [train_metrics_optuna["R²"], train_metrics_optuna["MAE"], train_metrics_optuna["RMSE"]],
-    "验证集": [val_metrics_optuna["R²"], val_metrics_optuna["MAE"], val_metrics_optuna["RMSE"]],
-    "测试集": [test_metrics_optuna["R²"], test_metrics_optuna["MAE"], test_metrics_optuna["RMSE"]]
+    "指标": ["R²", "MAE", "MSE", "RMSE"],
+    "训练集": [train_metrics_optuna["R²"], train_metrics_optuna["MAE"], train_metrics_optuna["MSE"], train_metrics_optuna["RMSE"]],
+    "验证集": [val_metrics_optuna["R²"], val_metrics_optuna["MAE"], val_metrics_optuna["MSE"], val_metrics_optuna["RMSE"]],
+    "测试集": [test_metrics_optuna["R²"], test_metrics_optuna["MAE"], test_metrics_optuna["MSE"], test_metrics_optuna["RMSE"]]
 })
 optuna_metrics_df.to_excel(os.path.join(output_dir, "LightGBM_Optuna_评估指标.xlsx"), index=False)
 
-# 绘制损失曲线
-print("\n9. 生成可视化结果")
+# 绘制训练过程中的损失曲线
 def plot_training_curve(evals_result, title, filename):
     plt.figure(figsize=(10, 6))
-    x_axis = range(len(evals_result['训练集']['rmse']))
+    epochs = len(evals_result['训练集']['rmse'])
+    x_axis = range(0, epochs)
+    
     plt.plot(x_axis, evals_result['训练集']['rmse'], 'b-', label='训练集')
     plt.plot(x_axis, evals_result['验证集']['rmse'], 'r-', label='验证集')
-    plt.legend(), plt.xlabel('迭代次数'), plt.ylabel('RMSE'), plt.title(title)
-    plt.savefig(filename, dpi=300, bbox_inches='tight'), plt.close()
+    plt.legend()
+    plt.xlabel('迭代次数')
+    plt.ylabel('RMSE')
+    plt.title(title)
+    plt.grid(True)
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
 
-plot_training_curve(evals_result_grid, "网格搜索模型损失曲线",
-                    os.path.join(output_dir, "LightGBM_网格搜索_损失曲线.png"))
-plot_training_curve(evals_result_optuna, "Optuna优化模型损失曲线",
-                    os.path.join(output_dir, "LightGBM_Optuna_损失曲线.png"))
+# 绘制损失曲线
+print("\n正在绘制损失曲线...")
+plot_training_curve(evals_result_grid, "网格搜索模型训练过程损失曲线", 
+                   os.path.join(output_dir, "LightGBM_网格搜索_损失曲线.png"))
+plot_training_curve(evals_result_optuna, "Optuna优化模型训练过程损失曲线", 
+                   os.path.join(output_dir, "LightGBM_Optuna_损失曲线.png"))
+print("损失曲线绘制完成!")
 
-# 绘制预测对比图
+# 绘制实际值与预测值的对比图
 def plot_actual_vs_predicted(y_true, y_pred, title, filename):
     plt.figure(figsize=(10, 6))
     plt.scatter(y_true, y_pred, alpha=0.5)
-    min_val, max_val = min(min(y_true), min(y_pred)), max(max(y_true), max(y_pred))
+    
+    # 添加对角线（理想预测线）
+    min_val = min(min(y_true), min(y_pred))
+    max_val = max(max(y_true), max(y_pred))
     plt.plot([min_val, max_val], [min_val, max_val], 'r--')
-    plt.xlabel('实际值'), plt.ylabel('预测值'), plt.title(title)
-    plt.savefig(filename, dpi=300, bbox_inches='tight'), plt.close()
+    
+    plt.xlabel('实际值')
+    plt.ylabel('预测值')
+    plt.title(title)
+    plt.grid(True)
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+
+# 绘制实际值与预测值的对比图
+print("\n正在绘制实际值与预测值对比图...")
 
 # 网格搜索模型对比图
-plot_actual_vs_predicted(y_train, y_train_pred_grid, "网格搜索-训练集",
-                         os.path.join(output_dir, "LightGBM_网格搜索_训练集_实际vs预测.png"))
-plot_actual_vs_predicted(y_test, y_test_pred_grid, "网格搜索-测试集",
-                         os.path.join(output_dir, "LightGBM_网格搜索_测试集_实际vs预测.png"))
+plot_actual_vs_predicted(y_train, y_train_pred_grid, "网格搜索模型-训练集：实际值 vs 预测值", 
+                        os.path.join(output_dir, "LightGBM_网格搜索_训练集_实际vs预测.png"))
+plot_actual_vs_predicted(y_val, y_val_pred_grid, "网格搜索模型-验证集：实际值 vs 预测值", 
+                        os.path.join(output_dir, "LightGBM_网格搜索_验证集_实际vs预测.png"))
+plot_actual_vs_predicted(y_test, y_test_pred_grid, "网格搜索模型-测试集：实际值 vs 预测值", 
+                        os.path.join(output_dir, "LightGBM_网格搜索_测试集_实际vs预测.png"))
 
 # Optuna模型对比图
-plot_actual_vs_predicted(y_train, y_train_pred_optuna, "Optuna-训练集",
-                         os.path.join(output_dir, "LightGBM_Optuna_训练集_实际vs预测.png"))
-plot_actual_vs_predicted(y_test, y_test_pred_optuna, "Optuna-测试集",
-                         os.path.join(output_dir, "LightGBM_Optuna_测试集_实际vs预测.png"))
-
-# 特征重要性分析
-def plot_feature_importance(importance, features, title, filename):
-    df = pd.DataFrame({'特征': features, '重要性': importance}).sort_values('重要性', ascending=False)
-    plt.figure(figsize=(10, 6))
-    plt.barh(df['特征'], df['重要性']), plt.xlabel('重要性'), plt.title(title)
-    plt.savefig(filename, dpi=300, bbox_inches='tight'), plt.close()
-    return df
-
-# 网格搜索模型特征重要性
-grid_imp_df = plot_feature_importance(grid_model.feature_importances_, features, 
-                                      "网格搜索模型特征重要性", 
-                                      os.path.join(output_dir, "LightGBM_网格搜索_特征重要性.png"))
-grid_imp_df.to_excel(os.path.join(output_dir, "LightGBM_网格搜索_特征重要性.xlsx"), index=False)
-
-# Optuna模型特征重要性
-optuna_imp_df = plot_feature_importance(final_model.feature_importances_, features,
-                                        "Optuna优化模型特征重要性",
-                                        os.path.join(output_dir, "LightGBM_Optuna_特征重要性.png"))
-optuna_imp_df.to_excel(os.path.join(output_dir, "LightGBM_Optuna_特征重要性.xlsx"), index=False)
+plot_actual_vs_predicted(y_train, y_train_pred_optuna, "Optuna优化模型-训练集：实际值 vs 预测值", 
+                        os.path.join(output_dir, "LightGBM_Optuna_训练集_实际vs预测.png"))
+plot_actual_vs_predicted(y_val, y_val_pred_optuna, "Optuna优化模型-验证集：实际值 vs 预测值", 
+                        os.path.join(output_dir, "LightGBM_Optuna_验证集_实际vs预测.png"))
+plot_actual_vs_predicted(y_test, y_test_pred_optuna, "Optuna优化模型-测试集：实际值 vs 预测值", 
+                        os.path.join(output_dir, "LightGBM_Optuna_测试集_实际vs预测.png"))
+print("对比图绘制完成!")
 
 # 保存预测结果
 def save_predictions(X_data, y_true, y_pred, filename, dataset_name):
+    # 创建结果DataFrame
     result_df = pd.DataFrame(X_data, columns=features)
-    result_df[target] = y_true.values
+    result_df[target] = y_true.values if hasattr(y_true, 'values') else y_true
     result_df['预测值'] = y_pred
     result_df['残差'] = result_df[target] - result_df['预测值']
+    result_df['数据集'] = dataset_name
+    # 保存到Excel
     result_df.to_excel(filename, index=False)
 
-save_predictions(X_train, y_train, y_train_pred_optuna,
-                 os.path.join(output_dir, "LightGBM_Optuna_训练集_预测结果.xlsx"), "训练集")
-save_predictions(X_test, y_test, y_test_pred_optuna,
-                 os.path.join(output_dir, "LightGBM_Optuna_测试集_预测结果.xlsx"), "测试集")
+# 保存预测结果
+print("\n正在保存预测结果...")
+
+# 网格搜索模型预测结果
+save_predictions(X_train, y_train, y_train_pred_grid, 
+                os.path.join(output_dir, "LightGBM_网格搜索_训练集_预测结果.xlsx"), "训练集")
+save_predictions(X_val, y_val, y_val_pred_grid, 
+                os.path.join(output_dir, "LightGBM_网格搜索_验证集_预测结果.xlsx"), "验证集")
+save_predictions(X_test, y_test, y_test_pred_grid, 
+                os.path.join(output_dir, "LightGBM_网格搜索_测试集_预测结果.xlsx"), "测试集")
+
+# Optuna模型预测结果
+save_predictions(X_train, y_train, y_train_pred_optuna, 
+                os.path.join(output_dir, "LightGBM_Optuna_训练集_预测结果.xlsx"), "训练集")
+save_predictions(X_val, y_val, y_val_pred_optuna, 
+                os.path.join(output_dir, "LightGBM_Optuna_验证集_预测结果.xlsx"), "验证集")
+save_predictions(X_test, y_test, y_test_pred_optuna, 
+                os.path.join(output_dir, "LightGBM_Optuna_测试集_预测结果.xlsx"), "测试集")
+print("预测结果保存完成!")
+
+# 特征重要性分析
+print("\n正在进行特征重要性分析...")
+
+# 网格搜索模型特征重要性
+grid_feature_importance = grid_model.feature_importances_
+grid_feature_importance_df = pd.DataFrame({
+    '特征': features,
+    '重要性': grid_feature_importance
+})
+grid_feature_importance_df = grid_feature_importance_df.sort_values('重要性', ascending=False)
+grid_feature_importance_df.to_excel(os.path.join(output_dir, "LightGBM_网格搜索_特征重要性.xlsx"), index=False)
+
+# Optuna模型特征重要性
+optuna_feature_importance = final_model.feature_importances_
+optuna_feature_importance_df = pd.DataFrame({
+    '特征': features,
+    '重要性': optuna_feature_importance
+})
+optuna_feature_importance_df = optuna_feature_importance_df.sort_values('重要性', ascending=False)
+optuna_feature_importance_df.to_excel(os.path.join(output_dir, "LightGBM_Optuna_特征重要性.xlsx"), index=False)
+
+# 绘制特征重要性图
+def plot_feature_importance(feature_importance_df, title, filename):
+    plt.figure(figsize=(10, 6))
+    plt.barh(feature_importance_df['特征'], feature_importance_df['重要性'])
+    plt.xlabel('重要性')
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+
+plot_feature_importance(grid_feature_importance_df, "网格搜索模型特征重要性", 
+                       os.path.join(output_dir, "LightGBM_网格搜索_特征重要性.png"))
+plot_feature_importance(optuna_feature_importance_df, "Optuna优化模型特征重要性", 
+                       os.path.join(output_dir, "LightGBM_Optuna_特征重要性.png"))
+print("特征重要性分析完成!")
+
+# 保存调参结果
+print("\n正在保存调参结果...")
+
+# 网格搜索调参结果
+with open(os.path.join(output_dir, "LightGBM_网格搜索_调参结果.txt"), "w", encoding='utf-8') as f:
+    f.write("LightGBM模型网格搜索结果:\n\n")
+    f.write("最佳参数:\n")
+    for param, value in best_params.items():
+        f.write(f"{param}: {value}\n")
+    f.write(f"最佳MSE: {-best_score:.4f}\n")
+    f.write(f"最佳RMSE: {np.sqrt(-best_score):.4f}\n")
+
+# Optuna调参结果
+with open(os.path.join(output_dir, "LightGBM_Optuna_调参结果.txt"), "w", encoding='utf-8') as f:
+    f.write("LightGBM模型Optuna优化结果:\n\n")
+    f.write("最佳参数:\n")
+    for param, value in study.best_params.items():
+        f.write(f"{param}: {value}\n")
+    f.write(f"最佳MSE: {study.best_value:.6f}\n")
+    f.write(f"最佳RMSE: {np.sqrt(study.best_value):.6f}\n")
+    if hasattr(final_model, 'best_iteration_') and final_model.best_iteration_ is not None:
+        f.write(f"最佳迭代次数: {final_model.best_iteration_}\n")
+
+print("调参结果保存完成!")
 
 # 创建最终比较表
+print("\n正在创建最终比较表...")
 comparison_df = pd.DataFrame({
-    "指标": ["R²", "MAE", "RMSE"],
-    "网格搜索-训练集": [train_metrics_grid["R²"], train_metrics_grid["MAE"], train_metrics_grid["RMSE"]],
-    "网格搜索-测试集": [test_metrics_grid["R²"], test_metrics_grid["MAE"], test_metrics_grid["RMSE"]],
-    "Optuna-训练集": [train_metrics_optuna["R²"], train_metrics_optuna["MAE"], train_metrics_optuna["RMSE"]],
-    "Optuna-测试集": [test_metrics_optuna["R²"], test_metrics_optuna["MAE"], test_metrics_optuna["RMSE"]]
+    "指标": ["R²", "MAE", "MSE", "RMSE"],
+    "网格搜索-训练集": [train_metrics_grid["R²"], train_metrics_grid["MAE"], train_metrics_grid["MSE"], train_metrics_grid["RMSE"]],
+    "网格搜索-验证集": [val_metrics_grid["R²"], val_metrics_grid["MAE"], val_metrics_grid["MSE"], val_metrics_grid["RMSE"]],
+    "网格搜索-测试集": [test_metrics_grid["R²"], test_metrics_grid["MAE"], test_metrics_grid["MSE"], test_metrics_grid["RMSE"]],
+    "Optuna-训练集": [train_metrics_optuna["R²"], train_metrics_optuna["MAE"], train_metrics_optuna["MSE"], train_metrics_optuna["RMSE"]],
+    "Optuna-验证集": [val_metrics_optuna["R²"], val_metrics_optuna["MAE"], val_metrics_optuna["MSE"], val_metrics_optuna["RMSE"]],
+    "Optuna-测试集": [test_metrics_optuna["R²"], test_metrics_optuna["MAE"], test_metrics_optuna["MSE"], test_metrics_optuna["RMSE"]]
 })
 comparison_df.to_excel(os.path.join(output_dir, "LightGBM_网格搜索vs_Optuna比较.xlsx"), index=False)
+print("最终比较表保存完成!")
 
-# 过拟合监控
-print("\n10. 过拟合分析")
-def monitor_overfitting(train, val, test):
-    gaps = {
-        "训练-验证差距": train["R²"] - val["R²"],
-        "训练-测试差距": train["R²"] - test["R²"],
-        "泛化差距": abs(val["R²"] - test["R²"])
-    }
-    print(f"训练-验证差距: {gaps['训练-验证差距']:.4f}")
-    print(f"泛化差距: {gaps['泛化差距']:.4f}")
-    return gaps
+print("\n" + "="*50)
+print("LightGBM模型训练和优化完成!")
+print(f"所有结果已保存到: {output_dir}")
+print("="*50)
 
-overfitting_gaps = monitor_overfitting(train_metrics_optuna, val_metrics_optuna, test_metrics_optuna)
-pd.DataFrame([overfitting_gaps]).to_excel(os.path.join(output_dir, "LightGBM_过拟合分析.xlsx"), index=False)
-
-print(f"\n所有结果已保存到: {output_dir}")
-print("LightGBM模型训练完成")
