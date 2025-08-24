@@ -5,244 +5,414 @@ import os
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-from sklearn.model_selection import KFold, cross_val_score
+from sklearn.model_selection import GridSearchCV, KFold, cross_val_score, train_test_split
+from sklearn.feature_selection import SelectKBest, f_regression
 from sklearn.ensemble import BaggingRegressor
 import joblib
+from tqdm import tqdm
 import warnings
 import optuna
 from optuna.visualization import plot_optimization_history, plot_param_importances
+import time
 
 warnings.filterwarnings('ignore')
 
-# 路径配置
+# 创建输出目录
 output_dir = r"F:\Machine leaning_SHAP\KNN2"
 os.makedirs(output_dir, exist_ok=True)
-data_path = r"F:\Machine leaning_SHAP\数据集.xlsx"
 
-# 数据加载与划分
-print("1. 加载数据...")
-all_data = pd.read_excel(data_path).sample(frac=1, random_state=42).reset_index(drop=True)
+# 读取数据
+print("正在读取数据...")
+all_data = pd.read_excel(r"F:\Machine leaning_SHAP\数据集.xlsx")
 
-# 数据集划分参数
-train_size, val_size, test_size = 21888, 7344, 5856
+# 打乱数据顺序
+all_data = all_data.sample(frac=1, random_state=42).reset_index(drop=True)
+
+# 按照指定数量划分数据集
+train_size = 21888
+val_size = 7344
+test_size = 5856
+
+# 确保数据总量足够
 total_required = train_size + val_size + test_size
 if len(all_data) < total_required:
-    raise ValueError(f"数据不足: 需{total_required}条，实际{len(all_data)}条")
+    raise ValueError(f"数据集总量不足，需要{total_required}条，但只有{len(all_data)}条")
 
+# 划分数据集
 train_data = all_data[:train_size]
 validation_data = all_data[train_size:train_size + val_size]
-test_data = all_data[train_size + val_size:total_required]
+test_data = all_data[train_size + val_size:train_size + val_size + test_size]
 
-# 特征与目标变量
+print(f"训练集大小: {len(train_data)}")
+print(f"验证集大小: {len(validation_data)}")
+print(f"测试集大小: {len(test_data)}")
+
+# 定义特征和目标变量
 features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
 target = "NEP"
 
-X_train, y_train = train_data[features], train_data[target]
-X_val, y_val = validation_data[features], validation_data[target]
-X_test, y_test = test_data[features], test_data[target]
+# 提取特征和目标变量
+X_train = train_data[features]
+y_train = train_data[target]
+
+X_val = validation_data[features]
+y_val = validation_data[target]
+
+X_test = test_data[features]
+y_test = test_data[target]
 
 # 数据归一化
-print("2. 数据归一化...")
+print("正在进行数据归一化...")
 scaler = MinMaxScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_val_scaled = scaler.transform(X_val)
 X_test_scaled = scaler.transform(X_test)
+
+# 保存归一化模型
 joblib.dump(scaler, os.path.join(output_dir, 'knn_scaler.pkl'))
 
 
-# 模型评估函数
+# 定义评估函数
 def evaluate_model(model, X, y, dataset_name):
     y_pred = model.predict(X)
     r2 = r2_score(y, y_pred)
     mae = mean_absolute_error(y, y_pred)
     mse = mean_squared_error(y, y_pred)
     rmse = np.sqrt(mse)
-    
-    print(f"[{dataset_name}] R²:{r2:.4f} | MAE:{mae:.4f} | MSE:{mse:.4f} | RMSE:{rmse:.4f}")
-    return {"r2": r2, "mae": mae, "mse": mse, "rmse": rmse, "y_pred": y_pred}
+
+    print(f"{dataset_name} 评估结果:")
+    print(f"R² 决定系数: {r2:.4f}")
+    print(f"MAE 平均绝对误差: {mae:.4f}")
+    print(f"MSE 均方误差: {mse:.4f}")
+    print(f"RMSE 均方根误差: {rmse:.4f}")
+    print("-" * 50)
+
+    return {
+        "r2": r2,
+        "mae": mae,
+        "mse": mse,
+        "rmse": rmse,
+        "y_pred": y_pred
+    }
 
 
-# 网格搜索基准参数保存
-grid_search_best_params = {'algorithm': 'auto', 'leaf_size': 10, 'n_neighbors': 7, 'p': 1, 'weights': 'distance'}
+# 网格搜索粗调的最佳参数
+grid_search_best_params = {
+    'algorithm': 'auto',
+    'leaf_size': 10,
+    'n_neighbors': 7,
+    'p': 1,
+    'weights': 'distance'
+}
+
+# 保存网格搜索粗调的最佳参数
 pd.DataFrame([grid_search_best_params]).to_excel(os.path.join(output_dir, 'grid_search_best_params.xlsx'), index=False)
 
-# Optuna调优
-print("3. Optuna参数优化（200次试验）...")
+# 使用Optuna进行精细调参
+print("\n正在使用Optuna进行精细调参...")
 
 
+# 定义早停回调函数
 class EarlyStoppingCallback:
-    def __init__(self, patience=20, min_delta=0.0001):
+    def __init__(self, patience=10, min_delta=0.001):
         self.patience = patience
         self.min_delta = min_delta
-        self.best_score, self.counter = None, 0
+        self.best_score = None
+        self.counter = 0
 
     def __call__(self, study, trial):
         score = trial.value
+
         if self.best_score is None:
             self.best_score = score
             return
-        if self.best_score - score > self.min_delta:
-            self.best_score, self.counter = score, 0
+
+        improvement = self.best_score - score  # 对于最小化问题
+
+        if improvement > self.min_delta:
+            self.best_score = score
+            self.counter = 0
         else:
             self.counter += 1
-            if self.counter >= self.patience:
-                print(f"早停: {self.patience}次试验无改善")
-                study.stop()
+
+        if self.counter >= self.patience:
+            print(f"\n早停: 在{self.patience}次试验中没有显著改善，停止优化。")
+            study.stop()
 
 
+# 定义目标函数
 def objective(trial):
-    # 超参数搜索空间
-    params = {
-        'n_neighbors': trial.suggest_int('n_neighbors', 15, 40),
-        'weights': trial.suggest_categorical('weights', ['uniform']),
-        'p': trial.suggest_int('p', 1, 2),
-        'algorithm': trial.suggest_categorical('algorithm', ['auto', 'ball_tree', 'kd_tree', 'brute']),
-        'leaf_size': trial.suggest_int('leaf_size', 30, 80, 10),
-        'use_bagging': trial.suggest_categorical('use_bagging', [True]),
-        'n_estimators': trial.suggest_int('n_estimators', 30, 80),
-        'max_samples': trial.suggest_float('max_samples', 0.2, 0.4),
-        'max_features': trial.suggest_float('max_features', 0.2, 0.4)
-    }
+    # 进一步大幅增加k值，强制使用更大的邻居数
+    n_neighbors = trial.suggest_int('n_neighbors', 15, 40)  # 再次提高k值范围
 
-    # 模型构建
-    knn = KNeighborsRegressor(**{k: v for k, v in params.items() if k in ['n_neighbors', 'weights', 'p', 'algorithm', 'leaf_size']})
-    model = BaggingRegressor(estimator=knn, n_estimators=params['n_estimators'],
-                             max_samples=params['max_samples'], max_features=params['max_features'],
-                             random_state=42, bootstrap=True, bootstrap_features=True)
+    # 更偏向uniform权重，减少对距离的敏感性
+    weights = trial.suggest_categorical('weights', ['uniform'])  # 只使用uniform权重
 
-    # 交叉验证
+    p = trial.suggest_int('p', 1, 2)
+
+    algorithm = trial.suggest_categorical('algorithm', ['auto', 'ball_tree', 'kd_tree', 'brute'])
+
+    # 进一步增大leaf_size
+    leaf_size = trial.suggest_int('leaf_size', 30, 80, 10)  # 更大的leaf_size
+
+    # 强制使用Bagging集成，并进一步增强正则化
+    use_bagging = trial.suggest_categorical('use_bagging', [True])
+
+    # 大幅增加集成器数量，进一步减少每个集成器的复杂度
+    n_estimators = trial.suggest_int('n_estimators', 30, 80)  # 更多集成器
+    max_samples = trial.suggest_float('max_samples', 0.2, 0.4)  # 更小的采样比例
+    max_features = trial.suggest_float('max_features', 0.2, 0.4)  # 更小的特征采样比例
+
+    # 使用所有特征，不进行特征选择
+    X_train_selected = X_train_scaled
+    X_val_selected = X_val_scaled
+
+    # 创建KNN模型
+    knn = KNeighborsRegressor(
+        n_neighbors=n_neighbors,
+        weights=weights,
+        p=p,
+        algorithm=algorithm,
+        leaf_size=leaf_size
+    )
+
+    # 强制使用Bagging集成，移除n_jobs参数避免编码问题
+    model = BaggingRegressor(
+        estimator=knn,
+        n_estimators=n_estimators,
+        max_samples=max_samples,
+        max_features=max_features,
+        random_state=42,
+        bootstrap=True,
+        bootstrap_features=True
+        # 移除 n_jobs=-1 以避免中文路径编码问题
+    )
+
+    # 使用五折交叉验证评估模型
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=kf, scoring='neg_mean_squared_error')
+    cv_scores = cross_val_score(model, X_train_selected, y_train,
+                                cv=kf, scoring='neg_mean_squared_error')
+
+    # 返回负MSE的平均值（Optuna默认最小化目标函数）
     return -np.mean(cv_scores)
 
 
-# 执行Optuna优化
+# 创建Optuna研究对象
 study = optuna.create_study(direction='minimize')
-study.optimize(objective, n_trials=200, callbacks=[EarlyStoppingCallback()], show_progress_bar=True)
 
-# 最佳参数保存与输出
+# 添加早停回调
+early_stopping = EarlyStoppingCallback(patience=20, min_delta=0.0001)
+
+# 运行优化
+study.optimize(objective, n_trials=200, callbacks=[early_stopping], show_progress_bar=True)
+
+# 获取最佳参数
 optuna_best_params = study.best_params
-print(f"4. Optuna最佳参数: {optuna_best_params}")
-pd.DataFrame([optuna_best_params]).to_excel(os.path.join(output_dir, 'optuna_best_params.xlsx'), index=False)
+print("\nOptuna最佳参数:")
+for param, value in optuna_best_params.items():
+    print(f"{param}: {value}")
 
-# 最终模型训练
-print("5. 训练最终模型...")
-knn_params = {k: optuna_best_params[k] for k in ['n_neighbors', 'weights', 'p', 'algorithm', 'leaf_size']}
-final_knn = KNeighborsRegressor(**knn_params)
+# 保存Optuna最佳参数
+optuna_params_df = pd.DataFrame([optuna_best_params])
+optuna_params_df.to_excel(os.path.join(output_dir, 'optuna_best_params.xlsx'), index=False)
 
-if optuna_best_params['use_bagging']:
-    final_model = BaggingRegressor(estimator=final_knn, n_estimators=optuna_best_params['n_estimators'],
-                                   max_samples=optuna_best_params['max_samples'],
-                                   max_features=optuna_best_params['max_features'],
-                                   random_state=42, bootstrap=True, bootstrap_features=True)
+# 使用最佳参数创建最终模型
+print("\n使用Optuna最佳参数创建最终模型...")
+
+# 不进行特征选择，使用所有特征
+X_train_selected = X_train_scaled
+X_val_selected = X_val_scaled
+X_test_selected = X_test_scaled
+print("使用所有特征（不进行特征选择）")
+
+# 创建KNN模型
+final_knn = KNeighborsRegressor(
+    n_neighbors=optuna_best_params['n_neighbors'],
+    weights=optuna_best_params['weights'],
+    p=optuna_best_params['p'],
+    algorithm=optuna_best_params['algorithm'],
+    leaf_size=optuna_best_params['leaf_size']
+)
+
+# 如果使用Bagging集成
+if optuna_best_params.get('use_bagging', False):
+    final_model = BaggingRegressor(
+        estimator=final_knn,
+        n_estimators=optuna_best_params.get('n_estimators', 10),
+        max_samples=optuna_best_params.get('max_samples', 1.0),
+        max_features=optuna_best_params.get('max_features', 1.0),
+        random_state=42,
+        bootstrap=True,
+        bootstrap_features=True
+        # 同样移除 n_jobs 参数
+    )
+    print("使用Bagging集成")
 else:
     final_model = final_knn
+    print("不使用Bagging集成")
 
-final_model.fit(X_train_scaled, y_train)
+# 训练最终模型
+final_model.fit(X_train_selected, y_train)
+
+# 保存最终模型
 joblib.dump(final_model, os.path.join(output_dir, 'knn_optuna_best_model.pkl'))
 
-# 模型评估
-print("6. 模型评估:")
-train_res = evaluate_model(final_model, X_train_scaled, y_train, "训练集")
-val_res = evaluate_model(final_model, X_val_scaled, y_val, "验证集")
-test_res = evaluate_model(final_model, X_test_scaled, y_test, "测试集")
+# 评估最终模型性能
+print("\n正在评估最终模型性能...")
+train_results = evaluate_model(final_model, X_train_selected, y_train, "训练集")
+val_results = evaluate_model(final_model, X_val_selected, y_val, "验证集")
+test_results = evaluate_model(final_model, X_test_selected, y_test, "测试集")
 
-# 结果保存
-# 评估指标保存
+# 将评估结果保存到Excel文件
 results_df = pd.DataFrame({
     'Dataset': ['训练集', '验证集', '测试集'],
-    'R²': [train_res['r2'], val_res['r2'], test_res['r2']],
-    'MAE': [train_res['mae'], val_res['mae'], test_res['mae']],
-    'MSE': [train_res['mse'], val_res['mse'], test_res['mse']],
-    'RMSE': [train_res['rmse'], val_res['rmse'], test_res['rmse']]
+    'R²': [train_results['r2'], val_results['r2'], test_results['r2']],
+    'MAE': [train_results['mae'], val_results['mae'], test_results['mae']],
+    'MSE': [train_results['mse'], val_results['mse'], test_results['mse']],
+    'RMSE': [train_results['rmse'], val_results['rmse'], test_results['rmse']]
 })
+
 results_df.to_excel(os.path.join(output_dir, 'knn_optuna_evaluation_results.xlsx'), index=False)
 
-# 预测结果保存
-train_data['KNN_Optuna_Predicted_NEP'] = train_res['y_pred']
-validation_data['KNN_Optuna_Predicted_NEP'] = val_res['y_pred']
-test_data['KNN_Optuna_Predicted_NEP'] = test_res['y_pred']
+# 保存预测结果
+train_data['KNN_Optuna_Predicted_NEP'] = train_results['y_pred']
+validation_data['KNN_Optuna_Predicted_NEP'] = val_results['y_pred']
+test_data['KNN_Optuna_Predicted_NEP'] = test_results['y_pred']
 
 train_data.to_excel(os.path.join(output_dir, 'knn_optuna_train_predictions.xlsx'), index=False)
 validation_data.to_excel(os.path.join(output_dir, 'knn_optuna_validation_predictions.xlsx'), index=False)
 test_data.to_excel(os.path.join(output_dir, 'knn_optuna_test_predictions.xlsx'), index=False)
 
-# 参数对比保存
-params_comp = pd.DataFrame({
+# 比较粗调和精调参数
+params_comparison = pd.DataFrame({
     '参数': list(grid_search_best_params.keys()) + ['特征选择', 'Bagging集成'],
-    '网格搜索': list(grid_search_best_params.values()) + ['无', '无'],
-    'Optuna': [optuna_best_params.get(k, '未调整') for k in grid_search_best_params.keys()] +
-              ['全特征', f"是(n_estimators={optuna_best_params['n_estimators']})"]
+    '网格搜索粗调': list(grid_search_best_params.values()) + ['无', '无'],
+    'Optuna精调': [optuna_best_params.get(k, '未调整') for k in grid_search_best_params.keys()] +
+                  ['不使用特征选择（使用全部特征）',
+                   f"使用Bagging (n_estimators={optuna_best_params.get('n_estimators', '-')})" if optuna_best_params.get(
+                       'use_bagging', False) else '不使用']
 })
-params_comp.to_excel(os.path.join(output_dir, 'params_comparison.xlsx'), index=False)
 
-# 可视化生成
-print("7. 生成可视化图表...")
-# 1. 性能指标柱状图
+params_comparison.to_excel(os.path.join(output_dir, 'params_comparison.xlsx'), index=False)
+
+# 绘制损失曲线图
 plt.figure(figsize=(15, 10))
-metrics = ['R²', 'MAE', 'MSE', 'RMSE']
-train_vals = [train_res[m.lower()] for m in metrics]
-val_vals = [val_res[m.lower()] for m in metrics]
-test_vals = [test_res[m.lower()] for m in metrics]
 
-for i, (metric, train_val, val_val, test_val) in enumerate(zip(metrics, train_vals, val_vals, test_vals)):
-    plt.subplot(2, 2, i+1)
-    plt.bar(['训练集', '验证集', '测试集'], [train_val, val_val, test_val], color=['blue', 'green', 'red'])
-    plt.title(metric)
-    if metric == 'R²':
-        plt.ylim(0, 1)
+# 绘制训练集和验证集的R²对比
+plt.subplot(2, 2, 1)
+plt.bar(['训练集', '验证集', '测试集'],
+        [train_results['r2'], val_results['r2'], test_results['r2']],
+        color=['blue', 'green', 'red'])
+plt.title('R² 决定系数')
+plt.ylim(0, 1)
+
+# 绘制训练集和验证集的MAE对比
+plt.subplot(2, 2, 2)
+plt.bar(['训练集', '验证集', '测试集'],
+        [train_results['mae'], val_results['mae'], test_results['mae']],
+        color=['blue', 'green', 'red'])
+plt.title('MAE 平均绝对误差')
+
+# 绘制训练集和验证集的MSE对比
+plt.subplot(2, 2, 3)
+plt.bar(['训练集', '验证集', '测试集'],
+        [train_results['mse'], val_results['mse'], test_results['mse']],
+        color=['blue', 'green', 'red'])
+plt.title('MSE 均方误差')
+
+# 绘制训练集和验证集的RMSE对比
+plt.subplot(2, 2, 4)
+plt.bar(['训练集', '验证集', '测试集'],
+        [train_results['rmse'], val_results['rmse'], test_results['rmse']],
+        color=['blue', 'green', 'red'])
+plt.title('RMSE 均方根误差')
 
 plt.tight_layout()
 plt.savefig(os.path.join(output_dir, 'knn_optuna_performance_metrics.png'), dpi=300)
-plt.close()
 
-# 2. 真实值vs预测值散点图
+# 绘制真实值与预测值的对比图
 plt.figure(figsize=(18, 6))
-for i, (y_true, y_pred, title) in enumerate([(y_train, train_res['y_pred'], '训练集'),
-                                             (y_val, val_res['y_pred'], '验证集'),
-                                             (y_test, test_res['y_pred'], '测试集')]):
-    plt.subplot(1, 3, i+1)
-    plt.scatter(y_true, y_pred, alpha=0.5)
-    plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'r--')
-    plt.xlabel('真实值')
-    plt.ylabel('预测值')
-    plt.title(title)
+
+# 训练集
+plt.subplot(1, 3, 1)
+plt.scatter(y_train, train_results['y_pred'], alpha=0.5)
+plt.plot([y_train.min(), y_train.max()], [y_train.min(), y_train.max()], 'r--')
+plt.xlabel('真实值')
+plt.ylabel('预测值')
+plt.title('训练集: 真实值 vs 预测值')
+
+# 验证集
+plt.subplot(1, 3, 2)
+plt.scatter(y_val, val_results['y_pred'], alpha=0.5)
+plt.plot([y_val.min(), y_val.max()], [y_val.min(), y_val.max()], 'r--')
+plt.xlabel('真实值')
+plt.ylabel('预测值')
+plt.title('验证集: 真实值 vs 预测值')
+
+# 测试集
+plt.subplot(1, 3, 3)
+plt.scatter(y_test, test_results['y_pred'], alpha=0.5)
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
+plt.xlabel('真实值')
+plt.ylabel('预测值')
+plt.title('测试集: 真实值 vs 预测值')
 
 plt.tight_layout()
 plt.savefig(os.path.join(output_dir, 'knn_optuna_predictions_vs_actual.png'), dpi=300)
-plt.close()
 
-# 3. Optuna可视化
+# 保存Optuna优化历史和参数重要性图表
 try:
     import plotly
-    plot_optimization_history(study).write_image(os.path.join(output_dir, 'optuna_optimization_history.png'))
-    plot_param_importances(study).write_image(os.path.join(output_dir, 'optuna_param_importances.png'))
+
+    # 优化历史
+    history_fig = plot_optimization_history(study)
+    history_fig.write_image(os.path.join(output_dir, 'optuna_optimization_history.png'))
+
+    # 参数重要性
+    param_importance_fig = plot_param_importances(study)
+    param_importance_fig.write_image(os.path.join(output_dir, 'optuna_param_importances.png'))
+
     print("Optuna可视化图表已保存")
-except Exception as e:
-    # 简化版可视化
+except ImportError:
+    print("plotly包未安装，跳过Optuna可视化图表生成")
+    print("如需生成Optuna可视化图表，请安装plotly: pip install plotly kaleido")
+
+    # 使用matplotlib创建简单的优化历史图
     plt.figure(figsize=(12, 5))
+
     # 优化历史
     plt.subplot(1, 2, 1)
-    trials_vals = [t.value for t in study.trials if t.value is not None]
-    plt.plot(trials_vals)
+    trials_values = [trial.value for trial in study.trials if trial.value is not None]
+    plt.plot(trials_values)
     plt.title('Optuna优化历史')
     plt.xlabel('试验次数')
-    plt.ylabel('MSE')
-    # 参数重要性
+    plt.ylabel('目标函数值 (MSE)')
+    plt.grid(True)
+
+    # 参数重要性（简化版）
     plt.subplot(1, 2, 2)
-    if len(study.trials) > 10:
+    if len(study.trials) > 10:  # 确保有足够的试验数据
         try:
-            imp = optuna.importance.get_param_importances(study)
-            plt.barh(list(imp.keys()), list(imp.values()))
+            importances = optuna.importance.get_param_importances(study)
+            params = list(importances.keys())
+            values = list(importances.values())
+
+            plt.barh(params, values)
+            plt.title('参数重要性')
+            plt.xlabel('重要性')
         except:
             plt.text(0.5, 0.5, '参数重要性计算失败', ha='center', va='center', transform=plt.gca().transAxes)
+            plt.title('参数重要性')
     else:
         plt.text(0.5, 0.5, '试验数据不足', ha='center', va='center', transform=plt.gca().transAxes)
-    plt.title('参数重要性')
+        plt.title('参数重要性')
+
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'optuna_simple_analysis.png'), dpi=300)
-    plt.close()
-    print("简化版Optuna图表已保存")
+    print("已生成简化版Optuna分析图表")
 
-print(f"\n所有结果已保存至: {output_dir}")
-print("KNN模型优化完成")
+except Exception as e:
+    print(f"保存Optuna可视化图表时出错: {e}")
+
+print(f"\n所有结果已保存到 {output_dir} 目录")
+print("KNN回归模型Optuna精调训练和评估完成！")
