@@ -20,7 +20,6 @@ warnings.filterwarnings('ignore')
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
-
 class RFNEPRegressor:
     def __init__(self, output_dir="F:\\Machine leaning_SHAP\\RF2"):
         self.output_dir = output_dir
@@ -30,10 +29,10 @@ class RFNEPRegressor:
         self.best_params_optuna = None
         self.feature_names = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
         self.target_name = "NEP"
-
+        
         # 创建输出目录
         os.makedirs(self.output_dir, exist_ok=True)
-
+        
     def load_and_prepare_data(self, data_path="F:\\Machine leaning_SHAP\\数据集.xlsx"):
         """加载和准备数据"""
         print("正在加载数据...")
@@ -42,7 +41,7 @@ class RFNEPRegressor:
             data = pd.read_excel(data_path)
             print(f"数据加载成功，数据形状: {data.shape}")
             print(f"数据列名: {list(data.columns)}")
-
+            
             # 检查必要的列是否存在
             required_cols = self.feature_names + [self.target_name]
             missing_cols = [col for col in required_cols if col not in data.columns]
@@ -50,80 +49,80 @@ class RFNEPRegressor:
                 print(f"缺少必要的列: {missing_cols}")
                 print(f"可用的列: {list(data.columns)}")
                 raise ValueError(f"缺少必要的列: {missing_cols}")
-
+            
             # 提取特征和目标变量
             X = data[self.feature_names].copy()
             y = data[self.target_name].copy()
-
+            
             # 检查缺失值
             print(f"特征缺失值: {X.isnull().sum().sum()}")
             print(f"目标变量缺失值: {y.isnull().sum()}")
-
+            
             # 删除包含缺失值的行
             mask = ~(X.isnull().any(axis=1) | y.isnull())
             X = X[mask]
             y = y[mask]
-
+            
             print(f"清理后数据形状: X={X.shape}, y={y.shape}")
             print(f"目标变量统计: 均值={y.mean():.4f}, 标准差={y.std():.4f}")
             print(f"特征统计:")
             print(X.describe())
-
+            
             return X, y
-
+            
         except Exception as e:
             print(f"数据加载失败: {e}")
             # 生成更真实的示例数据用于测试
             print("生成更真实的示例数据用于测试...")
             np.random.seed(42)
             n_samples = 35088  # 21888 + 7344 + 5856
-
+            
             # 生成具有相关性的特征数据
             X = pd.DataFrame()
-
+            
             # 温度相关特征 (TA, TS)
             base_temp = np.random.normal(15, 10, n_samples)  # 基础温度
             X['TA'] = base_temp + np.random.normal(0, 2, n_samples)  # 空气温度
             X['TS'] = base_temp + np.random.normal(0, 3, n_samples)  # 土壤温度
-
+            
             # 湿度相关特征 (RH, shallow_SWC, deep_SWC)
             base_humidity = np.random.normal(60, 20, n_samples)
             X['RH'] = np.clip(base_humidity + np.random.normal(0, 5, n_samples), 0, 100)
-            X['shallow_SWC'] = np.clip(base_humidity / 100 * 0.4 + np.random.normal(0, 0.1, n_samples), 0, 1)
-            X['deep_SWC'] = np.clip(base_humidity / 100 * 0.3 + np.random.normal(0, 0.08, n_samples), 0, 1)
-
+            X['shallow_SWC'] = np.clip(base_humidity/100 * 0.4 + np.random.normal(0, 0.1, n_samples), 0, 1)
+            X['deep_SWC'] = np.clip(base_humidity/100 * 0.3 + np.random.normal(0, 0.08, n_samples), 0, 1)
+            
             # 降水和压力
             X['P'] = np.random.exponential(2, n_samples)  # 降水量
             X['SP'] = np.random.normal(1013, 20, n_samples)  # 大气压
-
+            
             # 辐射相关
             X['SD'] = np.random.exponential(8, n_samples)  # 日照时数
             X['PAR'] = X['SD'] * 50 + np.random.normal(0, 100, n_samples)  # 光合有效辐射
             X['ATM'] = np.random.normal(200, 50, n_samples)  # 大气辐射
-
+            
             # 生成与特征相关的NEP
             # NEP通常与温度、湿度、辐射等有复杂的非线性关系
-            y = (0.1 * X['TA'] +
-                 0.05 * X['RH'] +
-                 0.02 * X['PAR'] +
+            y = (0.1 * X['TA'] + 
+                 0.05 * X['RH'] + 
+                 0.02 * X['PAR'] + 
                  0.03 * X['shallow_SWC'] * 100 +
                  -0.01 * X['SP'] +
                  0.05 * X['SD'] +
                  0.02 * X['TS'] +
                  np.sin(X['TA'] * 0.1) * 2 +  # 非线性关系
                  np.random.normal(0, 1, n_samples))  # 噪声
-
+            
             y = pd.Series(y, name=self.target_name)
-
+            
             print(f"生成的数据形状: X={X.shape}, y={y.shape}")
             print(f"目标变量统计: 均值={y.mean():.4f}, 标准差={y.std():.4f}")
-
+            
             return X, y
-
+    
     def split_data(self, X, y, train_size=21888, val_size=7344, test_size=5856, random_state=42):
         """按指定大小划分数据集"""
         print("正在划分数据集...")
-
+        
         # 确保数据量足够
         total_needed = train_size + val_size + test_size
         if len(X) < total_needed:
@@ -134,74 +133,74 @@ class RFNEPRegressor:
             val_size = int(val_size * ratio)
             test_size = len(X) - train_size - val_size
             print(f"调整后: 训练集{train_size}, 验证集{val_size}, 测试集{test_size}")
-
+        
         # 打乱数据
         indices = np.random.RandomState(random_state).permutation(len(X))
         X_shuffled = X.iloc[indices].reset_index(drop=True)
         y_shuffled = y.iloc[indices].reset_index(drop=True)
-
+        
         # 按指定大小划分
         X_train = X_shuffled[:train_size]
         y_train = y_shuffled[:train_size]
-
-        X_val = X_shuffled[train_size:train_size + val_size]
-        y_val = y_shuffled[train_size:train_size + val_size]
-
-        X_test = X_shuffled[train_size + val_size:train_size + val_size + test_size]
-        y_test = y_shuffled[train_size + val_size:train_size + val_size + test_size]
-
+        
+        X_val = X_shuffled[train_size:train_size+val_size]
+        y_val = y_shuffled[train_size:train_size+val_size]
+        
+        X_test = X_shuffled[train_size+val_size:train_size+val_size+test_size]
+        y_test = y_shuffled[train_size+val_size:train_size+val_size+test_size]
+        
         print(f"训练集: {X_train.shape}")
         print(f"验证集: {X_val.shape}")
         print(f"测试集: {X_test.shape}")
-
+        
         return X_train, X_val, X_test, y_train, y_val, y_test
-
+    
     def normalize_data(self, X_train, X_val, X_test):
         """数据归一化"""
         print("正在进行数据归一化...")
-
+        
         # 检查是否需要归一化（对于随机森林，归一化不是必须的，但可以提高稳定性）
         print("特征范围检查:")
         for col in X_train.columns:
             print(f"  {col}: [{X_train[col].min():.2f}, {X_train[col].max():.2f}]")
-
+        
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_val_scaled = self.scaler.transform(X_val)
         X_test_scaled = self.scaler.transform(X_test)
-
+        
         # 转换回DataFrame
         X_train_scaled = pd.DataFrame(X_train_scaled, columns=self.feature_names)
         X_val_scaled = pd.DataFrame(X_val_scaled, columns=self.feature_names)
         X_test_scaled = pd.DataFrame(X_test_scaled, columns=self.feature_names)
-
+        
         return X_train_scaled, X_val_scaled, X_test_scaled
-
+    
     def evaluate_model(self, model, X, y, dataset_name=""):
         """评估模型性能"""
         y_pred = model.predict(X)
-
+        
         r2 = r2_score(y, y_pred)
         mae = mean_absolute_error(y, y_pred)
         mse = mean_squared_error(y, y_pred)
         rmse = np.sqrt(mse)
-
+        
         metrics = {
             'R²': r2,
             'MAE': mae,
             'MSE': mse,
             'RMSE': rmse
         }
-
+        
         print(f"{dataset_name}评估指标:")
         for metric, value in metrics.items():
             print(f"  {metric}: {value:.4f}")
-
+        
         return metrics, y_pred
-
+    
     def optuna_tuning(self, X_train, y_train, X_val, y_val, n_trials=200, cv_folds=5):
         """Optuna精调 - 加强防过拟合"""
         print("开始Optuna精调...")
-
+        
         def objective(trial):
             try:
                 params = {
@@ -215,39 +214,39 @@ class RFNEPRegressor:
                     'random_state': 42,
                     'n_jobs': -1
                 }
-
+                
                 # 添加更强的正则化
                 if trial.suggest_categorical('use_ccp_alpha', [True, False]):
                     params['ccp_alpha'] = trial.suggest_float('ccp_alpha', 0.001, 0.02)  # 增加剪枝强度
-
+                
                 # 创建模型
                 model = RandomForestRegressor(**params)
-
+                
                 # 交叉验证
                 kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
                 cv_scores = cross_val_score(model, X_train, y_train, cv=kf, scoring='r2', n_jobs=-1)
-
+                
                 # 验证集评估
                 model.fit(X_train, y_train)
                 val_score = model.score(X_val, y_val)
-
+                
                 # 更严格的过拟合检测和惩罚
                 cv_score = cv_scores.mean()
                 cv_std = cv_scores.std()
-
+                
                 # 如果交叉验证分数方差太大，说明模型不稳定
                 if cv_std > 0.1:
                     return -1.0
-
+                
                 # 重点关注验证集性能，减少对训练集性能的依赖
                 combined_score = 0.3 * cv_score + 0.7 * val_score
-
+                
                 # 更严格的过拟合惩罚
                 overfitting_penalty = cv_score - val_score
                 if overfitting_penalty > 0.02:  # 降低容忍度
                     penalty_factor = 1 - min(overfitting_penalty * 2, 0.3)  # 最多惩罚30%
                     combined_score *= penalty_factor
-
+                
                 # 额外惩罚过于复杂的模型
                 complexity_penalty = 0
                 if params.get('max_depth', 10) > 10:
@@ -256,49 +255,49 @@ class RFNEPRegressor:
                     complexity_penalty += 0.01
                 if params.get('min_samples_leaf', 5) < 3:
                     complexity_penalty += 0.01
-
+                
                 combined_score -= complexity_penalty
-
+                
                 return combined_score
-
+                
             except Exception as e:
                 print(f"Trial failed with error: {e}")
                 return -1.0
-
+        
         # 创建Optuna研究
         study = optuna.create_study(
             direction='maximize',
             sampler=TPESampler(seed=42)
         )
-
+        
         # 添加进度条
         with tqdm(total=n_trials, desc="Optuna优化进度") as pbar:
             def callback(study, trial):
                 pbar.update(1)
                 if study.best_value is not None:
                     pbar.set_postfix({'Best Score': f'{study.best_value:.4f}'})
-
+            
             study.optimize(objective, n_trials=n_trials, callbacks=[callback])
-
+        
         self.best_params_optuna = study.best_params
         print(f"Optuna最优参数: {self.best_params_optuna}")
         print(f"Optuna最优得分: {study.best_value:.4f}")
-
+        
         # 创建最优模型
         final_params = self.best_params_optuna.copy()
         final_params.pop('use_ccp_alpha', None)
         final_params['random_state'] = 42
         final_params['n_jobs'] = -1
-
+        
         best_model = RandomForestRegressor(**final_params)
         best_model.fit(X_train, y_train)
-
+        
         return best_model, self.best_params_optuna, study
-
+    
     def grid_search_tuning(self, X_train, y_train, cv_folds=3):
         """网格搜索粗调 - 防过拟合版本"""
         print("开始网格搜索粗调...")
-
+        
         # 更保守的参数网格，防止过拟合
         param_grid = {
             'n_estimators': [50, 100, 150],  # 减少树的数量
@@ -307,15 +306,15 @@ class RFNEPRegressor:
             'min_samples_leaf': [5, 10, 15],  # 增加叶子节点样本要求
             'max_features': ['sqrt', 'log2', 0.5]  # 限制特征选择
         }
-
+        
         # 创建随机森林模型
         rf = RandomForestRegressor(
-            random_state=42,
+            random_state=42, 
             n_jobs=-1,
             bootstrap=True,
             max_samples=0.8  # 减少采样比例
         )
-
+        
         # 网格搜索
         grid_search = GridSearchCV(
             estimator=rf,
@@ -325,86 +324,69 @@ class RFNEPRegressor:
             n_jobs=-1,
             verbose=1
         )
-
+        
         print("正在执行网格搜索...")
         grid_search.fit(X_train, y_train)
-
+        
         self.best_params_grid = grid_search.best_params_
         print(f"网格搜索最优参数: {self.best_params_grid}")
         print(f"网格搜索最优得分: {grid_search.best_score_:.4f}")
-
+        
         return grid_search.best_estimator_, self.best_params_grid
-
+    
     def evaluate_model_with_overfitting_check(self, model, X_train, y_train, X_val, y_val, X_test, y_test):
         """评估模型并检查过拟合情况"""
-        print("\n" + "=" * 40)
+        print("\n" + "="*40)
         print("模型性能评估与过拟合检查")
-        print("=" * 40)
-
+        print("="*40)
+        
         # 各数据集评估
         train_metrics, y_train_pred = self.evaluate_model(model, X_train, y_train, "训练集")
         val_metrics, y_val_pred = self.evaluate_model(model, X_val, y_val, "验证集")
         test_metrics, y_test_pred = self.evaluate_model(model, X_test, y_test, "测试集")
-
+        
         # 过拟合检查
         print("\n过拟合检查:")
         train_val_gap = train_metrics['R²'] - val_metrics['R²']
         train_test_gap = train_metrics['R²'] - test_metrics['R²']
-
+        
         print(f"训练集-验证集 R² 差距: {train_val_gap:.4f}")
         print(f"训练集-测试集 R² 差距: {train_test_gap:.4f}")
-
-        if train_val_gap > 0.1:
-            print("⚠️  警告: 存在明显过拟合 (训练集-验证集差距 > 0.1)")
-        elif train_val_gap > 0.05:
-            print("⚠️  注意: 存在轻微过拟合 (训练集-验证集差距 > 0.05)")
-        else:
-            print("✅ 过拟合控制良好")
-
-        # 泛化能力评估
-        val_test_consistency = abs(val_metrics['R²'] - test_metrics['R²'])
-        print(f"验证集-测试集 R² 一致性: {val_test_consistency:.4f}")
-
-        if val_test_consistency < 0.02:
-            print("✅ 模型泛化能力良好")
-        elif val_test_consistency < 0.05:
-            print("⚠️  模型泛化能力一般")
-        else:
-            print("❌ 模型泛化能力较差")
-
+  
+        
         return train_metrics, val_metrics, test_metrics, y_train_pred, y_val_pred, y_test_pred
-
+    
     def plot_results(self, y_train, y_train_pred, y_val, y_val_pred, y_test, y_test_pred):
         """绘制预测结果对比图"""
         plt.style.use('default')
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
         fig.suptitle('随机森林NEP回归预测结果', fontsize=16, fontweight='bold')
-
+        
         datasets = [
             ('训练集', y_train, y_train_pred, axes[0, 0]),
             ('验证集', y_val, y_val_pred, axes[0, 1]),
             ('测试集', y_test, y_test_pred, axes[1, 0])
         ]
-
+        
         for name, y_true, y_pred, ax in datasets:
             # 散点图
             ax.scatter(y_true, y_pred, alpha=0.6, s=20)
-
+            
             # 计算指标
             r2 = r2_score(y_true, y_pred)
             rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-
+            
             # 绘制理想线
             min_val = min(y_true.min(), y_pred.min())
             max_val = max(y_true.max(), y_pred.max())
             ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想预测线')
-
+            
             ax.set_xlabel('真实值')
             ax.set_ylabel('预测值')
             ax.set_title(f'{name}\nR² = {r2:.4f}, RMSE = {rmse:.4f}')
             ax.legend()
             ax.grid(True, alpha=0.3)
-
+        
         # 残差图
         ax = axes[1, 1]
         residuals = y_test - y_test_pred
@@ -414,83 +396,83 @@ class RFNEPRegressor:
         ax.set_ylabel('残差')
         ax.set_title('测试集残差图')
         ax.grid(True, alpha=0.3)
-
+        
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, 'prediction_results.png'), dpi=300, bbox_inches='tight')
         plt.show()
-
+        
         # 绘制损失曲线（这里用不同数据集的性能对比）
         self.plot_performance_comparison(y_train, y_train_pred, y_val, y_val_pred, y_test, y_test_pred)
-
+    
     def plot_performance_comparison(self, y_train, y_train_pred, y_val, y_val_pred, y_test, y_test_pred):
         """绘制性能对比图"""
         datasets = ['训练集', '验证集', '测试集']
         y_true_list = [y_train, y_val, y_test]
         y_pred_list = [y_train_pred, y_val_pred, y_test_pred]
-
+        
         metrics = ['R²', 'MAE', 'MSE', 'RMSE']
         results = {metric: [] for metric in metrics}
-
+        
         for y_true, y_pred in zip(y_true_list, y_pred_list):
             results['R²'].append(r2_score(y_true, y_pred))
             results['MAE'].append(mean_absolute_error(y_true, y_pred))
             results['MSE'].append(mean_squared_error(y_true, y_pred))
             results['RMSE'].append(np.sqrt(mean_squared_error(y_true, y_pred)))
-
+        
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
         fig.suptitle('模型性能对比 - 损失曲线', fontsize=16, fontweight='bold')
-
+        
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-
+        
         for i, (metric, values) in enumerate(results.items()):
-            ax = axes[i // 2, i % 2]
+            ax = axes[i//2, i%2]
             bars = ax.bar(datasets, values, color=colors, alpha=0.7)
             ax.set_title(f'{metric} 对比')
             ax.set_ylabel(metric)
-
+            
             # 添加数值标签
             for bar, value in zip(bars, values):
                 height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width() / 2., height,
-                        f'{value:.4f}', ha='center', va='bottom')
-
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{value:.4f}', ha='center', va='bottom')
+            
             ax.grid(True, alpha=0.3)
-
+        
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, 'performance_comparison.png'), dpi=300, bbox_inches='tight')
         plt.show()
-
+    
     def plot_feature_importance(self, model):
         """绘制特征重要性图"""
         feature_importance = pd.DataFrame({
             'feature': self.feature_names,
             'importance': model.feature_importances_
         }).sort_values('importance', ascending=False)
-
+        
         plt.figure(figsize=(10, 8))
         bars = plt.barh(range(len(feature_importance)), feature_importance['importance'])
         plt.yticks(range(len(feature_importance)), feature_importance['feature'])
         plt.xlabel('特征重要性')
         plt.title('随机森林特征重要性排序')
         plt.gca().invert_yaxis()
-
+        
         # 添加数值标签
         for i, (bar, importance) in enumerate(zip(bars, feature_importance['importance'])):
-            plt.text(bar.get_width() + 0.001, bar.get_y() + bar.get_height() / 2,
-                     f'{importance:.4f}', va='center')
-
+            plt.text(bar.get_width() + 0.001, bar.get_y() + bar.get_height()/2,
+                    f'{importance:.4f}', va='center')
+        
         plt.grid(True, alpha=0.3, axis='x')
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, 'feature_importance.png'), dpi=300, bbox_inches='tight')
         plt.show()
-
+        
         return feature_importance
-
-    def save_results(self, train_metrics, val_metrics, test_metrics,
-                     y_train_pred, y_val_pred, y_test_pred, feature_importance, study):
+    
+    def save_results(self, train_metrics, val_metrics, test_metrics, 
+                    y_train_pred, y_val_pred, y_test_pred, feature_importance, study):
         """保存所有结果到文件"""
         print("正在保存结果...")
-
+        
         # 1. 保存评估指标
         metrics_df = pd.DataFrame({
             '数据集': ['训练集', '验证集', '测试集'],
@@ -499,87 +481,87 @@ class RFNEPRegressor:
             'MSE': [train_metrics['MSE'], val_metrics['MSE'], test_metrics['MSE']],
             'RMSE': [train_metrics['RMSE'], val_metrics['RMSE'], test_metrics['RMSE']]
         })
-        metrics_df.to_csv(os.path.join(self.output_dir, 'evaluation_metrics.csv'),
-                          index=False, encoding='utf-8-sig')
-
+        metrics_df.to_csv(os.path.join(self.output_dir, 'evaluation_metrics.csv'), 
+                         index=False, encoding='utf-8-sig')
+        
         # 2. 保存预测结果
         # 确保所有预测结果长度一致
         min_len = min(len(y_train_pred), len(y_val_pred), len(y_test_pred))
         predictions_df = pd.DataFrame({
-            '训练集预测': y_train_pred[:min_len] if len(y_train_pred) >= min_len else
-            np.concatenate([y_train_pred, np.full(min_len - len(y_train_pred), np.nan)]),
-            '验证集预测': y_val_pred[:min_len] if len(y_val_pred) >= min_len else
-            np.concatenate([y_val_pred, np.full(min_len - len(y_val_pred), np.nan)]),
-            '测试集预测': y_test_pred[:min_len] if len(y_test_pred) >= min_len else
-            np.concatenate([y_test_pred, np.full(min_len - len(y_test_pred), np.nan)])
+            '训练集预测': y_train_pred[:min_len] if len(y_train_pred) >= min_len else 
+                        np.concatenate([y_train_pred, np.full(min_len - len(y_train_pred), np.nan)]),
+            '验证集预测': y_val_pred[:min_len] if len(y_val_pred) >= min_len else 
+                        np.concatenate([y_val_pred, np.full(min_len - len(y_val_pred), np.nan)]),
+            '测试集预测': y_test_pred[:min_len] if len(y_test_pred) >= min_len else 
+                        np.concatenate([y_test_pred, np.full(min_len - len(y_test_pred), np.nan)])
         })
-        predictions_df.to_csv(os.path.join(self.output_dir, 'predictions.csv'),
-                              index=False, encoding='utf-8-sig')
-
+        predictions_df.to_csv(os.path.join(self.output_dir, 'predictions.csv'), 
+                             index=False, encoding='utf-8-sig')
+        
         # 3. 保存特征重要性
-        feature_importance.to_csv(os.path.join(self.output_dir, 'feature_importance.csv'),
-                                  index=False, encoding='utf-8-sig')
-
+        feature_importance.to_csv(os.path.join(self.output_dir, 'feature_importance.csv'), 
+                                 index=False, encoding='utf-8-sig')
+        
         # 4. 保存最优参数
         params_df = pd.DataFrame([
             {'参数类型': '网格搜索最优参数', '参数': str(self.best_params_grid)},
             {'参数类型': 'Optuna最优参数', '参数': str(self.best_params_optuna)}
         ])
-        params_df.to_csv(os.path.join(self.output_dir, 'best_parameters.csv'),
-                         index=False, encoding='utf-8-sig')
-
+        params_df.to_csv(os.path.join(self.output_dir, 'best_parameters.csv'), 
+                        index=False, encoding='utf-8-sig')
+        
         # 5. 保存模型
         joblib.dump(self.best_model, os.path.join(self.output_dir, 'best_rf_model.pkl'))
         joblib.dump(self.scaler, os.path.join(self.output_dir, 'scaler.pkl'))
-
+        
         # 6. 保存Optuna优化历史
         if study is not None:
             optuna_df = study.trials_dataframe()
-            optuna_df.to_csv(os.path.join(self.output_dir, 'optuna_trials.csv'),
-                             index=False, encoding='utf-8-sig')
-
+            optuna_df.to_csv(os.path.join(self.output_dir, 'optuna_trials.csv'), 
+                            index=False, encoding='utf-8-sig')
+        
         # 7. 生成详细报告
         self.generate_report(train_metrics, val_metrics, test_metrics, feature_importance)
-
+        
         print(f"所有结果已保存到: {self.output_dir}")
-
-    def save_datasets(self, X_train, X_val, X_test, y_train, y_val, y_test,
-                      X_train_scaled, X_val_scaled, X_test_scaled):
+    
+    def save_datasets(self, X_train, X_val, X_test, y_train, y_val, y_test, 
+                     X_train_scaled, X_val_scaled, X_test_scaled):
         """保存训练集、验证集和测试集数据"""
         print("正在保存数据集...")
-
+        
         # 保存原始数据集（归一化前）
         train_data = X_train.copy()
         train_data[self.target_name] = y_train
-        train_data.to_csv(os.path.join(self.output_dir, 'train_dataset_original.csv'),
-                          index=False, encoding='utf-8-sig')
-
+        train_data.to_csv(os.path.join(self.output_dir, 'train_dataset_original.csv'), 
+                         index=False, encoding='utf-8-sig')
+        
         val_data = X_val.copy()
         val_data[self.target_name] = y_val
-        val_data.to_csv(os.path.join(self.output_dir, 'val_dataset_original.csv'),
-                        index=False, encoding='utf-8-sig')
-
+        val_data.to_csv(os.path.join(self.output_dir, 'val_dataset_original.csv'), 
+                       index=False, encoding='utf-8-sig')
+        
         test_data = X_test.copy()
         test_data[self.target_name] = y_test
-        test_data.to_csv(os.path.join(self.output_dir, 'test_dataset_original.csv'),
-                         index=False, encoding='utf-8-sig')
-
+        test_data.to_csv(os.path.join(self.output_dir, 'test_dataset_original.csv'), 
+                        index=False, encoding='utf-8-sig')
+        
         # 保存归一化后的数据集
         train_data_scaled = X_train_scaled.copy()
         train_data_scaled[self.target_name] = y_train
-        train_data_scaled.to_csv(os.path.join(self.output_dir, 'train_dataset_scaled.csv'),
-                                 index=False, encoding='utf-8-sig')
-
+        train_data_scaled.to_csv(os.path.join(self.output_dir, 'train_dataset_scaled.csv'), 
+                                index=False, encoding='utf-8-sig')
+        
         val_data_scaled = X_val_scaled.copy()
         val_data_scaled[self.target_name] = y_val
-        val_data_scaled.to_csv(os.path.join(self.output_dir, 'val_dataset_scaled.csv'),
-                               index=False, encoding='utf-8-sig')
-
+        val_data_scaled.to_csv(os.path.join(self.output_dir, 'val_dataset_scaled.csv'), 
+                              index=False, encoding='utf-8-sig')
+        
         test_data_scaled = X_test_scaled.copy()
         test_data_scaled[self.target_name] = y_test
-        test_data_scaled.to_csv(os.path.join(self.output_dir, 'test_dataset_scaled.csv'),
-                                index=False, encoding='utf-8-sig')
-
+        test_data_scaled.to_csv(os.path.join(self.output_dir, 'test_dataset_scaled.csv'), 
+                               index=False, encoding='utf-8-sig')
+        
         # 保存数据集划分信息
         dataset_info = pd.DataFrame({
             '数据集': ['训练集', '验证集', '测试集'],
@@ -590,9 +572,9 @@ class RFNEPRegressor:
             '目标变量最小值': [y_train.min(), y_val.min(), y_test.min()],
             '目标变量最大值': [y_train.max(), y_val.max(), y_test.max()]
         })
-        dataset_info.to_csv(os.path.join(self.output_dir, 'dataset_info.csv'),
-                            index=False, encoding='utf-8-sig')
-
+        dataset_info.to_csv(os.path.join(self.output_dir, 'dataset_info.csv'), 
+                           index=False, encoding='utf-8-sig')
+        
         print("数据集保存完成:")
         print("  - train_dataset_original.csv: 训练集原始数据")
         print("  - val_dataset_original.csv: 验证集原始数据")
@@ -604,56 +586,56 @@ class RFNEPRegressor:
 
     def run_complete_pipeline(self):
         """运行完整的建模流程"""
-        print("=" * 60)
+        print("="*60)
         print("随机森林NEP回归建模开始 - 防过拟合增强版")
-        print("=" * 60)
-
+        print("="*60)
+        
         # 1. 加载数据
         X, y = self.load_and_prepare_data()
-
+        
         # 2. 划分数据集
         X_train, X_val, X_test, y_train, y_val, y_test = self.split_data(X, y)
-
+        
         # 3. 数据归一化
         X_train_scaled, X_val_scaled, X_test_scaled = self.normalize_data(X_train, X_val, X_test)
-
+        
         # 4. 保存数据集
         self.save_datasets(X_train, X_val, X_test, y_train, y_val, y_test,
-                           X_train_scaled, X_val_scaled, X_test_scaled)
-
+                          X_train_scaled, X_val_scaled, X_test_scaled)
+        
         # 5. 网格搜索粗调
-        print("\n" + "=" * 40)
+        print("\n" + "="*40)
         print("第一阶段：网格搜索粗调 (防过拟合)")
-        print("=" * 40)
+        print("="*40)
         grid_model, grid_params = self.grid_search_tuning(X_train_scaled, y_train)
-
+        
         # 6. Optuna精调
-        print("\n" + "=" * 40)
+        print("\n" + "="*40)
         print("第二阶段：Optuna精调 (强化防过拟合)")
-        print("=" * 40)
+        print("="*40)
         self.best_model, optuna_params, study = self.optuna_tuning(
             X_train_scaled, y_train, X_val_scaled, y_val
         )
-
+        
         # 7. 模型评估与过拟合检查
         train_metrics, val_metrics, test_metrics, y_train_pred, y_val_pred, y_test_pred = \
             self.evaluate_model_with_overfitting_check(
                 self.best_model, X_train_scaled, y_train, X_val_scaled, y_val, X_test_scaled, y_test
             )
-
+        
         # 8. 绘制结果
         print("\n正在生成可视化结果...")
         self.plot_results(y_train, y_train_pred, y_val, y_val_pred, y_test, y_test_pred)
         feature_importance = self.plot_feature_importance(self.best_model)
-
+        
         # 9. 保存结果
         self.save_results(train_metrics, val_metrics, test_metrics,
-                          y_train_pred, y_val_pred, y_test_pred, feature_importance, study)
-
-        print("\n" + "=" * 60)
+                         y_train_pred, y_val_pred, y_test_pred, feature_importance, study)
+        
+        print("\n" + "="*60)
         print("随机森林NEP回归建模完成！")
-        print("=" * 60)
-
+        print("="*60)
+        
         return {
             'best_model': self.best_model,
             'grid_params': grid_params,
@@ -664,29 +646,27 @@ class RFNEPRegressor:
             'feature_importance': feature_importance
         }
 
-
 def main():
     """主函数"""
     # 创建模型实例
     rf_regressor = RFNEPRegressor()
-
+    
     # 运行完整流程
     results = rf_regressor.run_complete_pipeline()
-
+    
     # 打印最终总结
-    print("\n" + "=" * 60)
+    print("\n" + "="*60)
     print("最终结果总结")
-    print("=" * 60)
+    print("="*60)
     print(f"网格搜索最优参数: {results['grid_params']}")
     print(f"Optuna最优参数: {results['optuna_params']}")
     print("\n各数据集性能:")
-    for dataset, metrics in [('训练集', results['train_metrics']),
-                             ('验证集', results['val_metrics']),
-                             ('测试集', results['test_metrics'])]:
+    for dataset, metrics in [('训练集', results['train_metrics']), 
+                           ('验证集', results['val_metrics']), 
+                           ('测试集', results['test_metrics'])]:
         print(f"{dataset}: R²={metrics['R²']:.4f}, RMSE={metrics['RMSE']:.4f}")
-
+    
     print(f"\n所有结果文件已保存到: {rf_regressor.output_dir}")
-
 
 if __name__ == "__main__":
     main()
