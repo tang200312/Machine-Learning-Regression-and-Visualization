@@ -1,0 +1,324 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import xgboost as xgb
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.model_selection import GridSearchCV, KFold
+from scikeras.wrappers import KerasRegressor
+import optuna
+from tqdm import tqdm
+import warnings
+
+# ===================== 基础配置 =====================
+warnings.filterwarnings('ignore')
+# 固定随机种子（可复现）
+np.random.seed(42)
+tf.random.set_seed(42)
+# 输出目录与中文显示
+output_dir = r"F:\Machine leaning_SHAP\LightGBM"
+os.makedirs(output_dir, exist_ok=True)
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+print(f"1. 基础配置完成 | 输出目录: {output_dir}")
+
+# 特征与目标变量定义
+FEATURES = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+TARGET = "NEP"
+TIME_STEPS = 24  # LSTM时间步长（前24h预测下1h）
+
+
+# ===================== 工具函数定义 =====================
+def preprocess_data(data):
+    """提取特征与目标变量"""
+    X = data[FEATURES].values
+    y = data[TARGET].values.reshape(-1, 1)
+    return X, y
+
+def create_sequences(X, y, time_steps):
+    """转换为LSTM输入格式 (samples, time_steps, features)"""
+    Xs, ys = [], []
+    for i in range(len(X) - time_steps):
+        Xs.append(X[i:i+time_steps])
+        ys.append(y[i+time_steps])
+    return np.array(Xs), np.array(ys)
+
+def evaluate_model(y_true, y_pred):
+    """计算评估指标（R²/MAE/MSE/RMSE）"""
+    return {
+        'R²': r2_score(y_true, y_pred),
+        'MAE': mean_absolute_error(y_true, y_pred),
+        'MSE': mean_squared_error(y_true, y_pred),
+        'RMSE': np.sqrt(mean_squared_error(y_true, y_pred))
+    }
+
+def plot_time_series(true_values, pred_values, dataset_name, save_path):
+    """绘制时间序列对比图"""
+    plt.figure(figsize=(12, 6))
+    plt.plot(true_values, label='真实值', alpha=0.7)
+    plt.plot(pred_values, label='预测值', alpha=0.7)
+    plt.title(f'{dataset_name} 预测结果对比')
+    plt.xlabel('样本')
+    plt.ylabel('NEP')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+# ===================== 1. 数据加载与预处理 =====================
+print("\n2. 数据加载与预处理")
+# 读取数据
+train_data = pd.read_excel(r"F:\Machine leaning_SHAP\train.xlsx")
+validation_data = pd.read_excel(r"F:\Machine leaning_SHAP\validation.xlsx")
+test_data = pd.read_excel(r"F:\Machine leaning_SHAP\test.xlsx")
+print(f"   数据规模 | 训练集:{len(train_data)}行 | 验证集:{len(validation_data)}行 | 测试集:{len(test_data)}行")
+
+# 提取特征与目标
+X_train, y_train = preprocess_data(train_data)
+X_val, y_val = preprocess_data(validation_data)
+X_test, y_test = preprocess_data(test_data)
+
+# 归一化（特征+目标）
+X_scaler = MinMaxScaler(feature_range=(0, 1))
+y_scaler = MinMaxScaler(feature_range=(0, 1))
+# 特征归一化
+X_train_scaled = X_scaler.fit_transform(X_train)
+X_val_scaled = X_scaler.transform(X_val)
+X_test_scaled = X_scaler.transform(X_test)
+# 目标归一化
+y_train_scaled = y_scaler.fit_transform(y_train)
+y_val_scaled = y_scaler.transform(y_val)
+y_test_scaled = y_scaler.transform(y_test)
+
+# 生成LSTM序列数据
+X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train_scaled, TIME_STEPS)
+X_val_seq, y_val_seq = create_sequences(X_val_scaled, y_val_scaled, TIME_STEPS)
+X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test_scaled, TIME_STEPS)
+print(f"   序列数据生成完成 | 训练集维度: {X_train_seq.shape}")
+
+
+# ===================== 2. LSTM模型训练（特征提取） =====================
+print("\n3. LSTM模型训练（用于特征提取）")
+# LSTM模型定义
+def create_lstm_model(units=32, dropout_rate=0.3, learning_rate=0.001):
+    model = Sequential([
+        LSTM(units=units, return_sequences=True, 
+             input_shape=(X_train_seq.shape[1], X_train_seq.shape[2]),
+             dropout=dropout_rate),
+        LSTM(units=units//2, dropout=dropout_rate),
+        Dense(units//4, activation='relu'),
+        Dense(1)
+    ])
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate), loss='mse')
+    return model
+
+# LSTM网格搜索粗调
+param_grid = {
+    'model__units': [16, 32, 64],
+    'model__dropout_rate': [0.2, 0.3, 0.4],
+    'model__learning_rate': [0.001, 0.01],
+    'batch_size': [32, 64, 128],
+    'epochs': [30, 50]
+}
+# 包装Keras模型
+keras_model = KerasRegressor(model=create_lstm_model, verbose=0)
+# 网格搜索（3折交叉验证）
+grid = GridSearchCV(
+    estimator=keras_model, param_grid=param_grid,
+    cv=KFold(n_splits=3, shuffle=True, random_state=42),
+    scoring='neg_mean_squared_error', verbose=0, n_jobs=1
+)
+grid_result = grid.fit(X_train_seq, y_train_seq)
+
+# 输出LSTM粗调结果
+print(f"   LSTM粗调最佳参数: {grid_result.best_params_}")
+print(f"   LSTM粗调最佳MSE: {-grid_result.best_score_:.6f}")
+# 保存LSTM粗调结果
+pd.DataFrame(grid_result.cv_results_).to_excel(
+    os.path.join(output_dir, 'lstm_xgb_grid_search_results.xlsx'), index=False
+)
+pd.DataFrame({
+    '参数': list(grid_result.best_params_.keys()),
+    '粗调最佳值': list(grid_result.best_params_.values())
+}).to_excel(
+    os.path.join(output_dir, 'lstm_xgb_lstm_best_params.xlsx'), index=False
+)
+
+# 训练最终LSTM模型
+best_lstm_params = grid_result.best_params_
+final_lstm_model = create_lstm_model(
+    units=best_lstm_params['model__units'],
+    dropout_rate=best_lstm_params['model__dropout_rate'],
+    learning_rate=best_lstm_params['model__learning_rate']
+)
+# 早停防止过拟合
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+# 训练模型
+lstm_history = final_lstm_model.fit(
+    X_train_seq, y_train_seq,
+    epochs=best_lstm_params['epochs'],
+    batch_size=best_lstm_params['batch_size'],
+    validation_data=(X_val_seq, y_val_seq),
+    callbacks=[early_stopping],
+    verbose=1
+)
+
+# 绘制LSTM损失曲线
+plt.figure(figsize=(10, 6))
+plt.plot(lstm_history.history['loss'], label='训练损失')
+plt.plot(lstm_history.history['val_loss'], label='验证损失')
+plt.title('LSTM模型损失曲线')
+plt.ylabel('MSE损失')
+plt.xlabel('轮次')
+plt.legend()
+plt.savefig(os.path.join(output_dir, 'lstm_xgb_lstm_loss_curve.png'), dpi=300, bbox_inches='tight')
+plt.close()
+
+# 提取LSTM中间层特征（倒数第二层输出）
+def extract_lstm_features(model, X_seq):
+    feature_model = tf.keras.Model(inputs=model.inputs, outputs=model.layers[-2].output)
+    return feature_model.predict(X_seq, verbose=0)
+
+lstm_features_train = extract_lstm_features(final_lstm_model, X_train_seq)
+lstm_features_val = extract_lstm_features(final_lstm_model, X_val_seq)
+lstm_features_test = extract_lstm_features(final_lstm_model, X_test_seq)
+print(f"   LSTM特征提取完成 | 特征维度: {lstm_features_train.shape[1]}")
+
+
+# ===================== 3. 融合特征准备（原始特征+LSTM特征） =====================
+print("\n4. 融合特征准备")
+# 对齐特征长度（跳过前TIME_STEPS个样本）
+X_train_combined = np.hstack([X_train_scaled[TIME_STEPS:], lstm_features_train])
+X_val_combined = np.hstack([X_val_scaled[TIME_STEPS:], lstm_features_val])
+X_test_combined = np.hstack([X_test_scaled[TIME_STEPS:], lstm_features_test])
+# 对齐目标变量长度
+y_train_combined = y_train_scaled[TIME_STEPS:]
+y_val_combined = y_val_scaled[TIME_STEPS:]
+y_test_combined = y_test_scaled[TIME_STEPS:]
+# 反归一化目标（用于最终评估）
+y_train_orig = y_scaler.inverse_transform(y_train_combined)
+y_val_orig = y_scaler.inverse_transform(y_val_combined)
+y_test_orig = y_scaler.inverse_transform(y_test_combined)
+print(f"   融合特征维度 | 训练集: {X_train_combined.shape}")
+
+
+# ===================== 4. XGBoost模型调优与训练 =====================
+print("\n5. XGBoost模型调优")
+# 5.1 XGBoost网格搜索粗调
+print("   5.1 XGBoost网格搜索粗调（3折交叉验证）")
+xgb_param_grid = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [3, 5, 7],
+    'learning_rate': [0.01, 0.05, 0.1],
+    'subsample': [0.7, 0.8, 0.9],
+    'colsample_bytree': [0.7, 0.8, 0.9],
+    'min_child_weight': [1, 3, 5]
+}
+xgb_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
+# 网格搜索
+xgb_grid = GridSearchCV(
+    estimator=xgb_model, param_grid=xgb_param_grid,
+    cv=KFold(n_splits=3, shuffle=True, random_state=42),
+    scoring='r2', verbose=0, n_jobs=-1
+)
+xgb_grid_result = xgb_grid.fit(X_train_combined, y_train_combined)
+
+# 输出XGBoost粗调结果
+print(f"   XGBoost粗调最佳参数: {xgb_grid_result.best_params_}")
+print(f"   XGBoost粗调最佳R²: {xgb_grid_result.best_score_:.4f}")
+# 保存粗调结果
+pd.DataFrame(xgb_grid_result.cv_results_).to_excel(
+    os.path.join(output_dir, 'lstm_xgb_xgboost_grid_search_results.xlsx'), index=False
+)
+pd.DataFrame({
+    '参数': list(xgb_grid_result.best_params_.keys()),
+    '粗调最佳值': list(xgb_grid_result.best_params_.values())
+}).to_excel(
+    os.path.join(output_dir, 'lstm_xgb_xgboost_grid_best_params.xlsx'), index=False
+)
+
+# 5.2 XGBoost Optuna精调（基于粗调结果缩小搜索范围）
+print("\n   5.2 XGBoost Optuna精调（200次实验）")
+xgb_best_grid = xgb_grid_result.best_params_
+
+def objective(trial):
+    """Optuna目标函数（5折交叉验证最大化R²）"""
+    params = {
+        'n_estimators': trial.suggest_int('n_estimators', 
+                                          max(50, xgb_best_grid['n_estimators']-100),
+                                          min(500, xgb_best_grid['n_estimators']+100)),
+        'max_depth': trial.suggest_int('max_depth', 
+                                       max(2, xgb_best_grid['max_depth']-2),
+                                       min(10, xgb_best_grid['max_depth']+2)),
+        'learning_rate': trial.suggest_float('learning_rate', 
+                                             max(0.005, xgb_best_grid['learning_rate']/2),
+                                             min(0.2, xgb_best_grid['learning_rate']*2),
+                                             log=True),
+        'subsample': trial.suggest_float('subsample', 
+                                         max(0.6, xgb_best_grid['subsample']-0.1),
+                                         min(1.0, xgb_best_grid['subsample']+0.1)),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 
+                                                max(0.6, xgb_best_grid['colsample_bytree']-0.1),
+                                                min(1.0, xgb_best_grid['colsample_bytree']+0.1)),
+        'min_child_weight': trial.suggest_int('min_child_weight', 
+                                              max(1, xgb_best_grid['min_child_weight']-2),
+                                              min(10, xgb_best_grid['min_child_weight']+2)),
+        'gamma': trial.suggest_float('gamma', 0, 5),
+        'reg_alpha': trial.suggest_float('reg_alpha', 0, 5),
+        'reg_lambda': trial.suggest_float('reg_lambda', 0, 5),
+        'random_state': 42
+    }
+    
+    # 5折交叉验证
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    scores = []
+    for train_idx, val_idx in kf.split(X_train_combined):
+        X_fold_train, X_fold_val = X_train_combined[train_idx], X_train_combined[val_idx]
+        y_fold_train, y_fold_val = y_train_combined[train_idx], y_train_combined[val_idx]
+        
+        model = xgb.XGBRegressor(**params)
+        model.fit(X_fold_train, y_fold_train)
+        y_pred = model.predict(X_fold_val)
+        scores.append(r2_score(y_fold_val, y_pred))
+    
+    return np.mean(scores)
+
+# Optuna进度条回调
+class ProgressCallback:
+    def __init__(self, n_trials):
+        self.n_trials = n_trials
+        self.pbar = tqdm(total=n_trials, desc="Optuna优化进度")
+    def __call__(self, study, trial):
+        self.pbar.update(1)
+        self.pbar.set_postfix({"最佳R²": f"{study.best_value:.4f}"})
+
+# 执行Optuna优化
+study = optuna.create_study(direction='maximize')
+n_trials = 200
+progress_callback = ProgressCallback(n_trials)
+study.optimize(objective, n_trials=n_trials, callbacks=[progress_callback])
+progress_callback.pbar.close()
+
+# 输出Optuna精调结果
+print(f"   XGBoost精调最佳参数: {study.best_params_}")
+print(f"   XGBoost精调最佳R²: {study.best_value:.4f}")
+# 保存精调结果
+# 整理Optuna历史记录
+optuna_history = pd.DataFrame({
+    'trial': [t.number for t in study.trials],
+    'value': [t.value for t in study.trials]
+})
+for param in study.best_params_.keys():
+    optuna_history[f'param_{param}'] = [t.params.get(param) for t in study.trials]
+optuna_history.to_excel(
+    os.path.join(output_dir, 'lstm_xgb_optuna_results.xlsx'), index=False
+)
+# 保存最佳参数
+pd.DataFrame({
+    '参数': list(study.best
