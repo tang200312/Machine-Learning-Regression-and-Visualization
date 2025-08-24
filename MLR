@@ -1,0 +1,252 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.model_selection import KFold, GridSearchCV, train_test_split
+import os
+import time
+import joblib
+from tqdm import tqdm
+from collections import Counter
+
+# ===================== 初始化设置 =====================
+# 创建输出目录
+output_dir = "F:\\Machine leaning_SHAP\\PLS"
+os.makedirs(output_dir, exist_ok=True)
+
+# 设置中文显示
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+# ===================== 数据加载与预处理 =====================
+print("1. 数据加载与划分")
+# 读取数据集
+data = pd.read_excel("F:\\Machine leaning_SHAP\\数据集.xlsx")
+print(f"   数据集规模: {data.shape[0]}行 × {data.shape[1]}列")
+
+# 定义特征和目标变量
+features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+target = "NEP"
+
+# 提取特征和目标变量
+X = data[features]
+y = data[target]
+
+# 划分数据集
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=5856, random_state=42, shuffle=True
+)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=7344, random_state=42, shuffle=True
+)
+
+print(f"   训练集: {X_train.shape[0]}行 | 验证集: {X_val.shape[0]}行 | 测试集: {X_test.shape[0]}行")
+
+# 保存划分后的数据集
+train_data = pd.concat([X_train, y_train], axis=1)
+val_data = pd.concat([X_val, y_val], axis=1)
+test_data = pd.concat([X_test, y_test], axis=1)
+
+train_data.to_excel(os.path.join(output_dir, "训练集.xlsx"), index=False)
+val_data.to_excel(os.path.join(output_dir, "验证集.xlsx"), index=False)
+test_data.to_excel(os.path.join(output_dir, "测试集.xlsx"), index=False)
+
+# 数据归一化
+scaler = MinMaxScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_test_scaled = scaler.transform(X_test)
+
+# 合并训练集和验证集用于交叉验证
+X_train_val = np.vstack((X_train_scaled, X_val_scaled))
+y_train_val = np.concatenate((y_train.values, y_val.values))
+
+# ===================== 模型评估函数 =====================
+def evaluate_model(y_true, y_pred, dataset_name):
+    """计算并返回评估指标"""
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    
+    print(f"   {dataset_name} 评估:")
+    print(f"   R² = {r2:.4f} | MAE = {mae:.4f} | MSE = {mse:.4f} | RMSE = {rmse:.4f}")
+    
+    return {"R²": r2, "MAE": mae, "MSE": mse, "RMSE": rmse}
+
+# ===================== 交叉验证与参数优化 =====================
+print("\n2. 交叉验证与参数优化")
+param_grid = {'n_components': range(1, min(11, len(features) + 1))}
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+cv_scores = {"R²": [], "MAE": [], "MSE": [], "RMSE": []}
+best_n_components_per_fold = []
+
+start_time = time.time()
+for fold, (train_idx, val_idx) in enumerate(tqdm(kf.split(X_train_val), total=5, desc="   交叉验证")):
+    # 分割数据
+    X_fold_train, X_fold_val = X_train_val[train_idx], X_train_val[val_idx]
+    y_fold_train, y_fold_val = y_train_val[train_idx], y_train_val[val_idx]
+    
+    # 网格搜索最佳组件数
+    pls = PLSRegression()
+    grid_search = GridSearchCV(pls, param_grid, cv=5, scoring='neg_mean_squared_error', verbose=0)
+    grid_search.fit(X_fold_train, y_fold_train)
+    
+    best_n = grid_search.best_params_['n_components']
+    best_n_components_per_fold.append(best_n)
+    
+    # 训练模型并评估
+    model = PLSRegression(n_components=best_n)
+    model.fit(X_fold_train, y_fold_train)
+    y_pred = model.predict(X_fold_val).flatten()
+    metrics = evaluate_model(y_fold_val, y_pred, f"第{fold+1}折验证集")
+    
+    # 保存指标
+    for metric in cv_scores:
+        cv_scores[metric].append(metrics[metric])
+
+# 交叉验证结果汇总
+print("\n   交叉验证平均指标:")
+for metric in cv_scores:
+    print(f"   平均{metric} = {np.mean(cv_scores[metric]):.4f} ± {np.std(cv_scores[metric]):.4f}")
+
+# 确定最佳组件数
+component_counts = Counter(best_n_components_per_fold)
+final_n_components = component_counts.most_common(1)[0][0]
+print(f"\n   各折最佳组件数: {best_n_components_per_fold}")
+print(f"   最终选择组件数: {final_n_components}")
+print(f"   交叉验证耗时: {time.time() - start_time:.2f}秒")
+
+# ===================== 训练最终模型 =====================
+print("\n3. 训练最终模型")
+final_model = PLSRegression(n_components=final_n_components)
+final_model.fit(X_train_scaled, y_train)
+
+# 保存模型
+joblib.dump(final_model, os.path.join(output_dir, "PLS_最终模型.pkl"))
+joblib.dump(scaler, os.path.join(output_dir, "PLS_特征缩放器.pkl"))
+joblib.dump(final_n_components, os.path.join(output_dir, "PLS_组件数.pkl"))
+print("   模型保存完成")
+
+# ===================== 模型预测与评估 =====================
+print("\n4. 模型预测与评估")
+# 预测
+y_train_pred = final_model.predict(X_train_scaled).flatten()
+y_val_pred = final_model.predict(X_val_scaled).flatten()
+y_test_pred = final_model.predict(X_test_scaled).flatten()
+
+# 评估
+train_metrics = evaluate_model(y_train, y_train_pred, "训练集")
+val_metrics = evaluate_model(y_val, y_val_pred, "验证集")
+test_metrics = evaluate_model(y_test, y_test_pred, "测试集")
+
+# 保存评估指标
+metrics_df = pd.DataFrame({
+    "指标": ["R²", "MAE", "MSE", "RMSE"],
+    "训练集": [train_metrics["R²"], train_metrics["MAE"], train_metrics["MSE"], train_metrics["RMSE"]],
+    "验证集": [val_metrics["R²"], val_metrics["MAE"], val_metrics["MSE"], val_metrics["RMSE"]],
+    "测试集": [test_metrics["R²"], test_metrics["MAE"], test_metrics["MSE"], test_metrics["RMSE"]]
+})
+metrics_df.to_excel(os.path.join(output_dir, "PLS_评估指标.xlsx"), index=False)
+
+# 保存交叉验证结果
+cv_results_df = pd.DataFrame({
+    "折数": [f"第{i+1}折" for i in range(5)],
+    "R²": cv_scores["R²"],
+    "MAE": cv_scores["MAE"],
+    "MSE": cv_scores["MSE"],
+    "RMSE": cv_scores["RMSE"],
+    "最佳组件数": best_n_components_per_fold
+})
+cv_results_df.to_excel(os.path.join(output_dir, "PLS_交叉验证结果.xlsx"), index=False)
+
+# ===================== 结果可视化 =====================
+print("\n5. 结果可视化与保存")
+def plot_actual_vs_predicted(y_true, y_pred, title, filename):
+    """绘制实际值与预测值对比散点图"""
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_true, y_pred, alpha=0.5)
+    # 理想预测线
+    min_val = min(min(y_true), min(y_pred))
+    max_val = max(max(y_true), max(y_pred))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--')
+    plt.xlabel('实际值')
+    plt.ylabel('预测值')
+    plt.title(title)
+    plt.grid(True)
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+
+# 绘制对比图
+plot_actual_vs_predicted(y_train, y_train_pred, "训练集：实际值 vs 预测值",
+                         os.path.join(output_dir, "PLS_训练集_实际vs预测.png"))
+plot_actual_vs_predicted(y_val, y_val_pred, "验证集：实际值 vs 预测值",
+                         os.path.join(output_dir, "PLS_验证集_实际vs预测.png"))
+plot_actual_vs_predicted(y_test, y_test_pred, "测试集：实际值 vs 预测值",
+                         os.path.join(output_dir, "PLS_测试集_实际vs预测.png"))
+
+# 保存预测结果
+def save_predictions(data, y_pred, filename):
+    """保存预测结果与残差"""
+    result_df = data.copy()
+    result_df['预测值'] = y_pred
+    result_df['残差'] = result_df[target] - result_df['预测值']
+    result_df.to_excel(filename, index=False)
+
+save_predictions(train_data, y_train_pred, os.path.join(output_dir, "PLS_训练集_预测结果.xlsx"))
+save_predictions(val_data, y_val_pred, os.path.join(output_dir, "PLS_验证集_预测结果.xlsx"))
+save_predictions(test_data, y_test_pred, os.path.join(output_dir, "PLS_测试集_预测结果.xlsx"))
+
+# ===================== 特征重要性分析 =====================
+print("6. 特征重要性分析")
+def calculate_vip(model):
+    """计算VIP特征重要性分数"""
+    t = model.x_scores_
+    w = model.x_weights_
+    q = model.y_loadings_
+    p, h = w.shape
+    
+    vips = np.zeros((p,))
+    s = np.diag(t.T @ t @ q.T @ q).reshape(h, -1)
+    total_s = np.sum(s)
+    
+    for i in range(p):
+        weight = np.array([(w[i, j] / np.linalg.norm(w[:, j])) ** 2 for j in range(h)])
+        vips[i] = np.sqrt(p * (s.T @ weight).item() / total_s)
+    
+    return vips
+
+# 计算VIP分数
+vip_scores = calculate_vip(final_model)
+feature_importance_df = pd.DataFrame({
+    '特征': features,
+    'VIP分数': vip_scores
+}).sort_values('VIP分数', ascending=False)
+
+# 保存并可视化特征重要性
+feature_importance_df.to_excel(os.path.join(output_dir, "PLS_特征重要性.xlsx"), index=False)
+
+plt.figure(figsize=(10, 6))
+plt.barh(feature_importance_df['特征'], feature_importance_df['VIP分数'])
+plt.xlabel('VIP分数')
+plt.title('PLS特征重要性 (VIP)')
+plt.axvline(x=1.0, color='r', linestyle='--', label='VIP=1阈值')
+plt.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "PLS_特征重要性.png"), dpi=300, bbox_inches='tight')
+plt.close()
+
+# ===================== 模型信息保存 =====================
+with open(os.path.join(output_dir, "PLS_模型信息.txt"), "w", encoding="utf-8") as f:
+    f.write("偏最小二乘法(PLS)模型信息\n")
+    f.write(f"数据集划分: 训练集{X_train.shape[0]}条 | 验证集{X_val.shape[0]}条 | 测试集{X_test.shape[0]}条\n")
+    f.write(f"最佳组件数: {final_n_components}\n")
+    f.write("重要特征 (VIP > 1.0):\n")
+    for _, row in feature_importance_df[feature_importance_df['VIP分数'] > 1.0].iterrows():
+        f.write(f"  {row['特征']}: {row['VIP分数']:.4f}\n")
+
+print(f"\n所有结果已保存至: {output_dir}")
+print("PLS模型分析流程完成!")
+    
