@@ -12,7 +12,7 @@ plt.rcParams['axes.unicode_minus'] = False
 
 class ModelPerformanceHeatmap:
     def __init__(self, color_scheme=1):
-        """初始化热图生成器"""
+       
         self.color_scheme = color_scheme
         self.output_dir = "F:\\Machine leaning_SHAP\\1"
 
@@ -20,12 +20,12 @@ class ModelPerformanceHeatmap:
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
 
-        # 字体大小设置（全部调大4号）
+ 
         self.font_sizes = {
-            'title': 18,      # 从14调大到18
-            'axis_label': 16, # 从12调大到16
-            'tick_label': 14, # 从10调大到14
-            'legend': 14      # 从10调大到14
+            'title': 18,     
+            'axis_label': 16, 
+            'tick_label': 14, 
+            'legend': 14     
         }
 
     def load_prediction_data(self, file_path):
@@ -43,7 +43,7 @@ class ModelPerformanceHeatmap:
 
             predictions = {}
 
-            # 提取模型名称（去除.1后缀的列名）
+        
             model_names = []
             for col in train_df.columns:
                 if not col.endswith('.1'):
@@ -53,7 +53,7 @@ class ModelPerformanceHeatmap:
 
             # 为每个模型提取数据
             for model in model_names:
-                true_col = model  # 真实值列
+                true_col = model  # 真实值
                 pred_col = f"{model}.1"  # 预测值列
 
                 if true_col in train_df.columns and pred_col in train_df.columns:
@@ -171,27 +171,27 @@ class ModelPerformanceHeatmap:
         return pd.DataFrame(all_metrics)
 
     def create_model_comparison_heatmap(self, metrics_df):
-        """创建模型对比热图 - 使用圆点大小表示指标值"""
+   
         print("Creating model comparison heatmap with circle sizes...")
 
-        # 创建上下布局的图形，更扁的长方形
+      
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(18, 8))
 
         models = metrics_df['model'].tolist()
 
         # 定义每个指标的颜色
         metric_colors = {
-            'R²': '#1f77b4',  # 蓝色
-            'RMSE': '#ff7f0e',  # 橙色
-            'MAE': '#2ca02c'  # 绿色
+            'R²': '#1f77b4',  
+            'RMSE': '#ff7f0e',  
+            'MAE': '#2ca02c' 
         }
 
-        # 训练集热图 - 调整指标顺序，R²放在第一位
+  
         train_metrics = ['train_r2', 'train_rmse', 'train_mae']
         train_labels = ['R²', 'RMSE', 'MAE']
         train_data = metrics_df[train_metrics].values
 
-        # 处理指标方向：R²越大越好，RMSE和MAE越小越好
+
         train_data_for_size = train_data.copy()
         # 对于RMSE和MAE，使用倒数来反转方向，使得越小的值对应越大的圆点
         train_data_for_size[:, 1] = 1 / (train_data[:, 1] + 0.001)  # RMSE倒数，避免除零
@@ -212,20 +212,20 @@ class ModelPerformanceHeatmap:
 
                 ax1.scatter(i, j, s=size, c=color, alpha=0.7, edgecolors='black', linewidth=1)
 
-                # 添加数值标签在圆点下方，向下移动更多（调大字体）
+          
                 text = f'{train_data[i, j]:.3f}'
                 ax1.text(i, j - 0.25, text, ha='center', va='top', fontsize=15,  # 从11调大到15
                          fontfamily='Times New Roman')
 
         ax1.set_xlim(-0.5, len(models) - 0.5)
-        ax1.set_ylim(-0.7, len(train_labels) - 0.3)  # 调整y轴范围，缩小指标间距
+        ax1.set_ylim(-0.7, len(train_labels) - 0.3) 
         ax1.set_xticks(range(len(models)))
-        ax1.set_xticklabels(models, rotation=0, ha='center', fontfamily='Times New Roman', fontsize=16)  # 从12调大到16
+        ax1.set_xticklabels(models, rotation=0, ha='center', fontfamily='Times New Roman', fontsize=16) 
         ax1.set_yticks(range(len(train_labels)))
-        ax1.set_yticklabels(train_labels, fontfamily='Times New Roman', fontsize=16)  # 从12调大到16
+        ax1.set_yticklabels(train_labels, fontfamily='Times New Roman', fontsize=16)  
         ax1.grid(True, alpha=0.6, linewidth=1)  # 增强网格线
 
-        # 在训练集图内添加文字标识，移除方框边框
+
         ax1.text(0.02, 0.98, 'Training Set\n(Circle Size = Model Performance)', transform=ax1.transAxes,
                  fontsize=14, fontfamily='Times New Roman',
                  verticalalignment='top')
@@ -263,9 +263,9 @@ class ModelPerformanceHeatmap:
         ax2.set_xlim(-0.5, len(models) - 0.5)
         ax2.set_ylim(-0.7, len(test_labels) - 0.3)  # 调整y轴范围，缩小指标间距
         ax2.set_xticks(range(len(models)))
-        ax2.set_xticklabels(models, rotation=0, ha='center', fontfamily='Times New Roman', fontsize=16)  # 从12调大到16
+        ax2.set_xticklabels(models, rotation=0, ha='center', fontfamily='Times New Roman', fontsize=16)  
         ax2.set_yticks(range(len(test_labels)))
-        ax2.set_yticklabels(test_labels, fontfamily='Times New Roman', fontsize=16)  # 从12调大到16
+        ax2.set_yticklabels(test_labels, fontfamily='Times New Roman', fontsize=16) 
         ax2.grid(True, alpha=0.6, linewidth=1)  # 增强网格线
 
         # 在测试集图内添加文字标识，移除方框边框
