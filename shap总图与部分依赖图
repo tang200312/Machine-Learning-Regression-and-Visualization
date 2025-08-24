@@ -42,18 +42,6 @@ print("=" * 60)
 print("SHAP可视化 - 综合特征重要性分析和偏依赖图")
 print("=" * 60)
 
-# 检查文件存在性
-if not os.path.exists(shap_data_path):
-    print(f"❌ 错误：找不到SHAP数据文件: {shap_data_path}")
-    exit()
-
-if not os.path.exists(feature_importance_path):
-    print(f"❌ 错误：找不到特征重要性文件: {feature_importance_path}")
-    exit()
-
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-    print(f"✅ 创建输出目录: {output_dir}")
 
 # 加载数据
 print("正在加载预计算的SHAP数据...")
@@ -69,12 +57,12 @@ try:
     background_data = shap_data_loaded['background_data']
     y_test_subset = shap_data_loaded['y_test_subset']
 
-    print(f"✅ SHAP数据加载成功!")
+    print(f"SHAP数据加载成功!")
     print(f"   - SHAP值矩阵形状: {shap_values_array.shape}")
     print(f"   - 特征数据形状: {shap_data_array.shape}")
 
 except Exception as e:
-    print(f"❌ 加载SHAP数据时出错: {str(e)}")
+    print(f" 加载SHAP数据时出错: {str(e)}")
     exit()
 
 # 加载特征重要性数据
@@ -82,7 +70,7 @@ try:
     feature_importance_data = np.load(feature_importance_path, allow_pickle=True)
     # 修复：使用正确的字段名
     feature_importance = feature_importance_data['mean_abs_shap']
-    print(f"✅ 特征重要性数据加载成功!")
+    print(f"特征重要性数据加载成功!")
     print(f"   - 特征重要性形状: {feature_importance.shape}")
 
     # 显示前几个特征的重要性值，验证PAR是否为最重要的
@@ -171,10 +159,10 @@ print("正在创建SHAP蜂群图...")
 # 使用预加载的特征重要性数据（如果可用）
 if 'feature_importance' in locals() and feature_importance is not None:
     all_mean_shap = feature_importance
-    print("✅ 使用预加载的特征重要性数据进行图表绘制")
+    print("使用预加载的特征重要性数据进行图表绘制")
 else:
     all_mean_shap = np.abs(shap_values_array).mean(0)
-    print("⚠️  使用平均绝对SHAP值作为特征重要性")
+    print("  使用平均绝对SHAP值作为特征重要性")
 
 all_std_shap = np.abs(shap_values_array).std(0)
 
@@ -408,7 +396,7 @@ plt.savefig(os.path.join(output_dir, 'comprehensive_feature_importance.tiff'),
             dpi=300, bbox_inches='tight', facecolor='white')
 plt.close()
 
-print("✅ 综合机器学习特征重要性可视化图表创建成功")
+print(" 综合机器学习特征重要性可视化图表创建成功")
 
 # ==================== 2. 前6个重要特征的依赖图面板（3×2布局） ====================
 print("\n=== 创建前6个重要特征的依赖图面板 ===")
@@ -518,6 +506,6 @@ plt.savefig(os.path.join(output_dir, 'top6_features_dependence_plots.tiff'),
             dpi=300, bbox_inches='tight', facecolor='white')
 plt.close()
 
-print("✅ 前6个重要特征的依赖图面板创建成功")
+print(" 前6个重要特征的依赖图面板创建成功")
 
 print(f"\n所有文件已保存至: {output_dir}")
