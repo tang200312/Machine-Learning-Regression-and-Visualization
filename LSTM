@@ -1,0 +1,297 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import l1_l2
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.model_selection import KFold
+import optuna
+from optuna.integration import TFKerasPruningCallback
+import warnings
+
+# 基础配置：屏蔽警告、固定随机种子
+warnings.filterwarnings('ignore')
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# ===================== 1. 路径与参数初始化 =====================
+output_dir = r"F:\Machine leaning_SHAP\LightGBM"
+os.makedirs(output_dir, exist_ok=True)
+print(f"1. 输出目录已创建: {output_dir}")
+
+# 特征与目标变量定义
+FEATURES = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+TARGET = "NEP"
+TIME_STEPS = 24  # LSTM时间步长（前24小时预测下1小时）
+
+
+# ===================== 2. 数据加载与预处理 =====================
+def load_data():
+    """加载训练/验证/测试集"""
+    train = pd.read_excel(r"F:\Machine leaning_SHAP\train.xlsx")
+    val = pd.read_excel(r"F:\Machine leaning_SHAP\validation.xlsx")
+    test = pd.read_excel(r"F:\Machine leaning_SHAP\test.xlsx")
+    print(f"2. 数据加载完成 | 训练集:{len(train)}行 | 验证集:{len(val)}行 | 测试集:{len(test)}行")
+    return train, val, test
+
+def scale_data(train, val, test):
+    """数据归一化（特征+目标变量）"""
+    # 提取特征与目标
+    X_train = train[FEATURES].values
+    y_train = train[TARGET].values.reshape(-1, 1)
+    X_val = val[FEATURES].values
+    y_val = val[TARGET].values.reshape(-1, 1)
+    X_test = test[FEATURES].values
+    y_test = test[TARGET].values.reshape(-1, 1)
+    
+    # 特征归一化
+    X_scaler = MinMaxScaler(feature_range=(0, 1))
+    X_train_scaled = X_scaler.fit_transform(X_train)
+    X_val_scaled = X_scaler.transform(X_val)
+    X_test_scaled = X_scaler.transform(X_test)
+    
+    # 目标变量归一化
+    y_scaler = MinMaxScaler(feature_range=(0, 1))
+    y_train_scaled = y_scaler.fit_transform(y_train)
+    y_val_scaled = y_scaler.transform(y_val)
+    y_test_scaled = y_scaler.transform(y_test)
+    
+    return (X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled, 
+            X_test_scaled, y_test_scaled, X_scaler, y_scaler)
+
+def create_lstm_sequences(X, y, time_steps):
+    """转换为LSTM输入格式 (samples, time_steps, features)"""
+    X_seq, y_seq = [], []
+    for i in range(len(X) - time_steps):
+        X_seq.append(X[i:i+time_steps])
+        y_seq.append(y[i+time_steps])
+    return np.array(X_seq), np.array(y_seq)
+
+# 执行数据流程
+train_df, val_df, test_df = load_data()
+X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled, X_test_scaled, y_test_scaled, X_scaler, y_scaler = scale_data(train_df, val_df, test_df)
+X_train_seq, y_train_seq = create_lstm_sequences(X_train_scaled, y_train_scaled, TIME_STEPS)
+X_val_seq, y_val_seq = create_lstm_sequences(X_val_scaled, y_val_scaled, TIME_STEPS)
+X_test_seq, y_test_seq = create_lstm_sequences(X_test_scaled, y_test_scaled, TIME_STEPS)
+print(f"   序列数据生成完成 | 训练集维度: {X_train_seq.shape}")
+
+
+# ===================== 3. 预设网格搜索粗调参数 =====================
+grid_best_params = {
+    'batch_size': 64,
+    'epochs': 50,
+    'model__dropout_rate': 0.3,
+    'model__learning_rate': 0.01,
+    'model__units': 32
+}
+# 保存粗调参数
+pd.DataFrame([grid_best_params]).to_excel(
+    os.path.join(output_dir, "lstm_grid_best_params.xlsx"), 
+    index=False
+)
+print("3. 网格粗调参数已保存")
+
+
+# ===================== 4. LSTM模型定义 =====================
+def build_lstm_model(units, dropout_rate, learning_rate, recurrent_dropout=0.0, l1=0.0, l2=0.0, 
+                     activation='tanh', recurrent_activation='sigmoid'):
+    """构建LSTM模型"""
+    model = Sequential([
+        LSTM(units=units, return_sequences=True, input_shape=(TIME_STEPS, len(FEATURES)),
+             dropout=dropout_rate, recurrent_dropout=recurrent_dropout,
+             kernel_regularizer=l1_l2(l1=l1, l2=l2), activation=activation,
+             recurrent_activation=recurrent_activation),
+        LSTM(units=units//2, dropout=dropout_rate, recurrent_dropout=recurrent_dropout,
+             kernel_regularizer=l1_l2(l1=l1, l2=l2), activation=activation,
+             recurrent_activation=recurrent_activation),
+        Dense(1, kernel_regularizer=l1_l2(l1=l1, l2=l2))
+    ])
+    model.compile(optimizer=Adam(learning_rate=learning_rate), loss='mse')
+    return model
+
+
+# ===================== 5. Optuna超参数精调 =====================
+def optuna_objective(trial):
+    """Optuna目标函数（五折交叉验证）"""
+    # 超参数搜索空间
+    params = {
+        'units': trial.suggest_categorical('units', [16, 24, 32, 48, 64]),
+        'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.5, step=0.05),
+        'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.01, log=True),
+        'batch_size': trial.suggest_categorical('batch_size', [32, 48, 64, 96, 128]),
+        'recurrent_dropout': trial.suggest_float('recurrent_dropout', 0.0, 0.3, step=0.05),
+        'l1': trial.suggest_float('l1', 1e-8, 1e-3, log=True),
+        'l2': trial.suggest_float('l2', 1e-8, 1e-3, log=True),
+        'activation': trial.suggest_categorical('activation', ['tanh', 'relu', 'elu']),
+        'recurrent_activation': trial.suggest_categorical('recurrent_activation', ['sigmoid', 'hard_sigmoid'])
+    }
+    
+    # 五折交叉验证
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    cv_loss = []
+    for train_idx, val_idx in kf.split(X_train_seq):
+        # 拆分折数据
+        X_fold_train, X_fold_val = X_train_seq[train_idx], X_train_seq[val_idx]
+        y_fold_train, y_fold_val = y_train_seq[train_idx], y_train_seq[val_idx]
+        
+        # 构建与训练模型
+        model = build_lstm_model(**params)
+        early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        pruning_cb = TFKerasPruningCallback(trial, 'val_loss')
+        
+        model.fit(
+            X_fold_train, y_fold_train, epochs=50, batch_size=params['batch_size'],
+            validation_data=(X_fold_val, y_fold_val), callbacks=[early_stop, pruning_cb],
+            verbose=0
+        )
+        
+        # 评估与清理
+        cv_loss.append(model.evaluate(X_fold_val, y_fold_val, verbose=0))
+        tf.keras.backend.clear_session()
+    
+    return np.mean(cv_loss)
+
+# 执行Optuna优化
+print("\n4. Optuna精调启动（200次实验）")
+study = optuna.create_study(direction='minimize', pruner=optuna.pruners.MedianPruner())
+study.optimize(optuna_objective, n_trials=200, show_progress_bar=True)
+
+# 保存Optuna结果
+optuna_best = study.best_params
+pd.DataFrame([optuna_best]).to_excel(
+    os.path.join(output_dir, "lstm_optuna_best_params.xlsx"), 
+    index=False
+)
+print(f"   精调完成 | 最佳验证损失: {study.best_value:.6f} | 最佳参数: {optuna_best}")
+
+
+# ===================== 6. 训练最终模型 =====================
+print("\n5. 训练最终模型")
+# 构建最终模型
+final_model = build_lstm_model(
+    units=optuna_best['units'], dropout_rate=optuna_best['dropout_rate'],
+    learning_rate=optuna_best['learning_rate'], recurrent_dropout=optuna_best['recurrent_dropout'],
+    l1=optuna_best['l1'], l2=optuna_best['l2'], activation=optuna_best['activation'],
+    recurrent_activation=optuna_best['recurrent_activation']
+)
+
+# 训练回调
+early_stop = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
+model_checkpoint = ModelCheckpoint(
+    os.path.join(output_dir, "best_lstm_model.h5"),
+    monitor='val_loss', save_best_only=True
+)
+
+# 训练模型
+history = final_model.fit(
+    X_train_seq, y_train_seq, epochs=100, batch_size=optuna_best['batch_size'],
+    validation_data=(X_val_seq, y_val_seq), callbacks=[early_stop, model_checkpoint],
+    verbose=1
+)
+
+# 绘制损失曲线
+plt.figure(figsize=(10, 6))
+plt.plot(history.history['loss'], label='训练损失')
+plt.plot(history.history['val_loss'], label='验证损失')
+plt.title('LSTM模型损失曲线')
+plt.xlabel('轮次')
+plt.ylabel('MSE')
+plt.legend()
+plt.savefig(os.path.join(output_dir, "lstm_loss_curve.png"), dpi=300, bbox_inches='tight')
+plt.close()
+print("   最终模型训练完成 | 损失曲线已保存")
+
+
+# ===================== 7. 模型评估与结果保存 =====================
+def evaluate_model(model, X_seq, y_seq, dataset_name, y_scaler):
+    """评估模型并返回指标与预测结果"""
+    # 预测与反归一化
+    y_pred_scaled = model.predict(X_seq, verbose=0)
+    y_true = y_scaler.inverse_transform(y_seq)
+    y_pred = y_scaler.inverse_transform(y_pred_scaled)
+    
+    # 计算指标
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    
+    # 输出结果
+    print(f"\n6. {dataset_name} 评估结果:")
+    print(f"   R²: {r2:.4f} | MAE: {mae:.4f} | RMSE: {rmse:.4f}")
+    
+    # 整理数据
+    metrics = pd.DataFrame({
+        '数据集': [dataset_name], 'R²': [r2], 'MAE': [mae], 'RMSE': [rmse]
+    })
+    predictions = pd.DataFrame({
+        '真实值': y_true.flatten(), '预测值': y_pred.flatten()
+    })
+    return metrics, predictions
+
+# 评估各数据集
+train_metrics, train_pred = evaluate_model(final_model, X_train_seq, y_train_seq, "训练集", y_scaler)
+val_metrics, val_pred = evaluate_model(final_model, X_val_seq, y_val_seq, "验证集", y_scaler)
+test_metrics, test_pred = evaluate_model(final_model, X_test_seq, y_test_seq, "测试集", y_scaler)
+
+# 保存评估结果
+all_metrics = pd.concat([train_metrics, val_metrics, test_metrics])
+all_metrics.to_excel(os.path.join(output_dir, "lstm_metrics.xlsx"), index=False)
+train_pred.to_excel(os.path.join(output_dir, "lstm_train_pred.xlsx"), index=False)
+val_pred.to_excel(os.path.join(output_dir, "lstm_val_pred.xlsx"), index=False)
+test_pred.to_excel(os.path.join(output_dir, "lstm_test_pred.xlsx"), index=False)
+
+
+# ===================== 8. 预测结果可视化 =====================
+def plot_results(true, pred, dataset_name, plot_type, save_path):
+    """绘制时间序列对比/散点图"""
+    plt.figure(figsize=(12, 6) if plot_type == 'time' else (8, 8))
+    if plot_type == 'time':
+        plt.plot(true, label='真实值', alpha=0.7)
+        plt.plot(pred, label='预测值', alpha=0.7)
+        plt.title(f'{dataset_name} 时间序列预测对比')
+        plt.xlabel('样本')
+    else:
+        plt.scatter(true, pred, alpha=0.5)
+        plt.plot([true.min(), true.max()], [true.min(), true.max()], 'r--')
+        plt.title(f'{dataset_name} 真实值 vs 预测值')
+        plt.xlabel('真实值')
+        plt.ylabel('预测值')
+    plt.legend()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+# 生成可视化
+print("\n7. 生成可视化结果")
+for name, pred_df in [("训练集", train_pred), ("验证集", val_pred), ("测试集", test_pred)]:
+    # 时间序列图
+    plot_results(
+        pred_df['真实值'], pred_df['预测值'], name, 'time',
+        os.path.join(output_dir, f"lstm_{name}_time_plot.png")
+    )
+    # 散点图
+    plot_results(
+        pred_df['真实值'], pred_df['预测值'], name, 'scatter',
+        os.path.join(output_dir, f"lstm_{name}_scatter.png")
+    )
+
+# 保存参数对比表
+param_compare = pd.DataFrame({
+    '调优方式': ['网格粗调', 'Optuna精调'],
+    '单元数': [grid_best_params['model__units'], optuna_best['units']],
+    'Dropout率': [grid_best_params['model__dropout_rate'], optuna_best['dropout_rate']],
+    '学习率': [grid_best_params['model__learning_rate'], optuna_best['learning_rate']],
+    '批量大小': [grid_best_params['batch_size'], optuna_best['batch_size']],
+    '循环Dropout': ['N/A', optuna_best['recurrent_dropout']],
+    'L1正则': ['N/A', optuna_best['l1']],
+    'L2正则': ['N/A', optuna_best['l2']]
+})
+param_compare.to_excel(os.path.join(output_dir, "lstm_param_compare.xlsx"), index=False)
+
+print(f"\n所有结果已保存至: {output_dir}")
+print("LSTM模型流程全部完成")
