@@ -1,0 +1,523 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+from datetime import datetime
+import warnings
+import shap
+from scipy.stats import pearsonr
+from scipy.signal import savgol_filter
+
+warnings.filterwarnings('ignore')
+
+
+# 字体设置 - 仅英文，无加粗（全部调大4号）
+def setup_fonts():
+    """设置字体配置，仅英文，无加粗"""
+    plt.rcParams['font.family'] = ['Times New Roman']
+    plt.rcParams['font.serif'] = ['Times New Roman']
+    plt.rcParams['axes.unicode_minus'] = False
+    plt.rcParams['font.size'] = 16          # 从12调大到16
+    plt.rcParams['axes.titlesize'] = 18     # 从14调大到18
+    plt.rcParams['axes.labelsize'] = 16     # 从12调大到16
+    plt.rcParams['xtick.labelsize'] = 14    # 从10调大到14
+    plt.rcParams['ytick.labelsize'] = 14    # 从10调大到14
+    plt.rcParams['legend.fontsize'] = 14    # 从10调大到14
+    plt.rcParams['font.weight'] = 'normal'
+    plt.rcParams['axes.titleweight'] = 'normal'
+    plt.rcParams['axes.labelweight'] = 'normal'
+
+
+setup_fonts()
+
+# 设置路径
+output_dir = r"F:\Machine leaning_SHAP\1"
+shap_data_path = r"F:\Machine leaning_SHAP\TabNet\date_shap\shap_data.npz"
+feature_importance_path = r"F:\Machine leaning_SHAP\TabNet\date_shap\feature_importance_data.npz"
+
+print("=" * 60)
+print("SHAP可视化 - 综合特征重要性分析和偏依赖图")
+print("=" * 60)
+
+# 检查文件存在性
+if not os.path.exists(shap_data_path):
+    print(f"❌ 错误：找不到SHAP数据文件: {shap_data_path}")
+    exit()
+
+if not os.path.exists(feature_importance_path):
+    print(f"❌ 错误：找不到特征重要性文件: {feature_importance_path}")
+    exit()
+
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+    print(f"✅ 创建输出目录: {output_dir}")
+
+# 加载数据
+print("正在加载预计算的SHAP数据...")
+try:
+    shap_data_loaded = np.load(shap_data_path, allow_pickle=True)
+
+    shap_values_array = shap_data_loaded['shap_values']
+    shap_data_array = shap_data_loaded['shap_data']
+    expected_value = float(shap_data_loaded['expected_value'])
+    features = shap_data_loaded['features'].tolist()
+    feature_names_en = shap_data_loaded['feature_names_en'].item()
+    feature_units = shap_data_loaded['feature_units'].item()
+    background_data = shap_data_loaded['background_data']
+    y_test_subset = shap_data_loaded['y_test_subset']
+
+    print(f"✅ SHAP数据加载成功!")
+    print(f"   - SHAP值矩阵形状: {shap_values_array.shape}")
+    print(f"   - 特征数据形状: {shap_data_array.shape}")
+
+except Exception as e:
+    print(f"❌ 加载SHAP数据时出错: {str(e)}")
+    exit()
+
+# 加载特征重要性数据
+try:
+    feature_importance_data = np.load(feature_importance_path, allow_pickle=True)
+    # 修复：使用正确的字段名
+    feature_importance = feature_importance_data['mean_abs_shap']
+    print(f"✅ 特征重要性数据加载成功!")
+    print(f"   - 特征重要性形状: {feature_importance.shape}")
+
+    # 显示前几个特征的重要性值，验证PAR是否为最重要的
+    feature_names_list = [feature_names_en[f] for f in features]
+    importance_df = pd.DataFrame({
+        'Feature': feature_names_list,
+        'Importance': feature_importance
+    }).sort_values('Importance', ascending=False)
+
+    print("   - 前10个最重要特征:")
+    for i, (_, row) in enumerate(importance_df.head(10).iterrows()):
+        print(f"     {i + 1:2d}. {row['Feature']:15s}: {row['Importance']:.6f}")
+
+except Exception as e:
+    print(f"❌ 加载特征重要性数据时出错: {str(e)}")
+    feature_importance = None
+    print("将在后续使用平均绝对SHAP值作为特征重要性")
+
+
+# 创建带单位的特征名称函数
+def get_feature_name_with_unit(feature_name):
+    """获取带单位的特征名称"""
+    if feature_name in feature_units:
+        return f"{feature_name} ({feature_units[feature_name]})"
+    return feature_name
+
+
+# 膝点检测函数
+def find_knee_point(x_data, y_data, window_length=5, polyorder=2):
+    """通过基于曲率的方法寻找曲线上趋势变化最显著的点"""
+    if len(x_data) < window_length:
+        return np.median(x_data)
+
+    if window_length % 2 == 0:
+        window_length += 1
+
+    if polyorder >= window_length:
+        polyorder = window_length - 1
+        if polyorder < 1:
+            polyorder = 1
+
+    y_second_deriv = savgol_filter(y_data, window_length, polyorder, deriv=2)
+    knee_index = np.argmax(np.abs(y_second_deriv))
+    sorted_x = np.array(x_data)[np.argsort(x_data)]
+    return sorted_x[knee_index]
+
+
+# 学术论文字体设置（全部调大4号）
+plt.rcParams.update({
+    'font.family': 'Times New Roman',
+    'font.size': 14,                    # 从10调大到14
+    'axes.titlesize': 16,               # 从12调大到16
+    'axes.labelsize': 14,               # 从10调大到14
+    'xtick.labelsize': 12,              # 从8调大到12
+    'ytick.labelsize': 12,              # 从8调大到12
+    'legend.fontsize': 12,              # 从8调大到12
+    'figure.titlesize': 18,             # 从14调大到18
+    'font.weight': 'normal',
+    'axes.titleweight': 'normal',
+    'axes.labelweight': 'normal',
+    'figure.titleweight': 'normal'
+})
+
+print("\n" + "=" * 60)
+print("开始绘制综合SHAP分析图表")
+print("=" * 60)
+
+# ==================== 1. 综合机器学习特征重要性可视化图表 ====================
+print("\n=== 创建综合机器学习特征重要性可视化图表 ===")
+
+# 创建图形和网格布局 - 增大画布尺寸，调整间距避免重叠
+fig = plt.figure(figsize=(18, 12))
+gs = fig.add_gridspec(3, 3, width_ratios=[1.5, 1, 1], height_ratios=[1, 1, 1],
+                      hspace=0.4, wspace=0.4)
+
+# 准备数据
+shap_size = len(shap_values_array)
+y_test_for_viz = y_test_subset
+
+# 左侧面板：手动创建SHAP蜂群图 - 跨越所有3行
+ax_left = fig.add_subplot(gs[:, 0])
+
+# 手动创建蜂群图效果
+print("正在创建SHAP蜂群图...")
+
+# 使用预加载的特征重要性数据（如果可用）
+if 'feature_importance' in locals() and feature_importance is not None:
+    all_mean_shap = feature_importance
+    print("✅ 使用预加载的特征重要性数据进行图表绘制")
+else:
+    all_mean_shap = np.abs(shap_values_array).mean(0)
+    print("⚠️  使用平均绝对SHAP值作为特征重要性")
+
+all_std_shap = np.abs(shap_values_array).std(0)
+
+# 按重要性排序所有特征
+all_sorted_indices = np.argsort(all_mean_shap)[::-1]
+all_sorted_features = [get_feature_name_with_unit(feature_names_en[features[i]]) for i in all_sorted_indices]
+
+# 显示排序后的特征重要性
+print("特征重要性排序（前10个）:")
+for i in range(min(10, len(all_sorted_indices))):
+    idx = all_sorted_indices[i]
+    feature_name = feature_names_en[features[idx]]
+    importance_val = all_mean_shap[idx]
+    print(f"  {i + 1:2d}. {feature_name:15s}: {importance_val:.6f}")
+
+# 为每个特征创建蜂群效果
+y_positions = np.arange(len(all_sorted_features))
+
+# 先绘制特征重要性条形图作为背景
+print("正在叠加特征重要性条形图...")
+
+# 获取排序后的特征重要性值
+sorted_importance = all_mean_shap[all_sorted_indices]
+
+# 将特征重要性值缩放到合适的范围，使其作为背景显示
+max_shap_range = np.max(np.abs(shap_values_array))
+min_shap_range = np.min(shap_values_array)  # 获取最小值，可能是负数
+scaled_importance = (sorted_importance / np.max(sorted_importance)) * max_shap_range * 0.6
+
+# 修复：使用与散点图相同的y位置系统
+for i, importance_val in enumerate(scaled_importance):
+    y_bar_pos = len(all_sorted_features) - 1 - i  # 与散点图y位置一致
+    # 绘制从最小SHAP值到缩放重要性值的条形图
+    ax_left.barh(y_bar_pos, importance_val,
+                 left=min_shap_range,  # 从最小SHAP值开始
+                 height=0.6, alpha=0.15,  # 降低透明度和高度避免重合
+                 color='red', edgecolor='none',
+                 zorder=0)  # 设置为背景层
+
+# 重新绘制散点图确保在前景
+for i, feature_idx in enumerate(all_sorted_indices):
+    feature_shap_vals = shap_values_array[:, feature_idx]
+    feature_vals = shap_data_array[:, feature_idx]
+
+    # 标准化特征值用于颜色映射
+    if feature_vals.max() != feature_vals.min():
+        norm_feature_vals = (feature_vals - feature_vals.min()) / (feature_vals.max() - feature_vals.min())
+    else:
+        norm_feature_vals = np.zeros_like(feature_vals)
+
+    # 添加随机抖动实现蜂群效果，减少抖动幅度避免重合
+    np.random.seed(42 + i)  # 为每个特征使用不同的种子
+    y_jitter = np.random.normal(0, 0.05, len(feature_shap_vals))  # 减少抖动幅度从0.08到0.05
+    # 最重要的特征在最上面
+    y_pos = np.full(len(feature_shap_vals), len(all_sorted_features) - 1 - i) + y_jitter
+
+    # 创建散点图，使用viridis颜色映射，确保在前景
+    scatter = ax_left.scatter(feature_shap_vals, y_pos,
+                              c=norm_feature_vals, cmap='viridis',
+                              s=12, alpha=0.7, edgecolors='none',  # 减小点大小，增加透明度
+                              zorder=3)  # 提高层级确保在前景
+
+# 设置y轴标签 - 确保标签位置与图形一致（调大字体）
+y_tick_positions = np.arange(len(all_sorted_features))
+ax_left.set_yticks(y_tick_positions)
+ax_left.set_yticklabels(all_sorted_features[::-1], fontsize=13)  # 从9调大到13
+
+# 设置y轴范围，确保所有元素都可见
+ax_left.set_ylim(-0.5, len(all_sorted_features) - 0.5)
+
+# 添加颜色条（调大字体）
+cbar = plt.colorbar(scatter, ax=ax_left, shrink=0.8, aspect=20)
+cbar.set_label('Feature Value\n(Low → High)', fontsize=13)  # 从9调大到13
+cbar.ax.tick_params(labelsize=12)  # 从8调大到12
+
+# 添加零线，确保在合适的层级
+ax_left.axvline(x=0, color='black', linestyle='-', alpha=0.5, linewidth=2, zorder=2)
+
+# 设置标签和标题（调大字体）
+ax_left.set_xlabel('SHAP Value (Impact on Model Output)', fontsize=15)  # 从11调大到15
+ax_left.set_title('SHAP Beeswarm Plot with Feature Importance\nFeature Impact Distribution',
+                  fontsize=17, pad=20)  # 从13调大到17
+ax_left.grid(True, alpha=0.3, axis='x', zorder=0)
+ax_left.set_axisbelow(True)
+
+# 设置坐标轴样式
+ax_left.spines['top'].set_visible(False)
+ax_left.spines['right'].set_visible(False)
+ax_left.spines['left'].set_linewidth(1.5)
+ax_left.spines['bottom'].set_linewidth(1.5)
+ax_left.tick_params(labelsize=13)  # 从9调大到13
+
+# 缩减x轴标签数量
+ax_left.locator_params(axis='x', nbins=4)
+
+# 右侧面板：前6个特征的散点图（3×2网格）
+print("正在创建前6个特征的SHAP散点图...")
+
+# 获取前6个最重要的特征
+top6_indices = all_sorted_indices[:6]
+top6_features = all_sorted_features[:6]
+
+print("前6个最重要特征:")
+for i, (idx, feature_name) in enumerate(zip(top6_indices, top6_features)):
+    importance_val = all_mean_shap[idx]
+    print(f"  {i + 1}. {feature_name}: {importance_val:.6f}")
+
+for i, (feature_idx, feature_name_with_unit) in enumerate(zip(top6_indices, top6_features)):
+    # 计算子图位置
+    row = i // 2
+    col = (i % 2) + 1
+
+    # 创建子图
+    ax = fig.add_subplot(gs[row, col])
+    ax.clear()
+
+    # 获取特征值和对应的SHAP值
+    feature_vals = shap_data_array[:, feature_idx]
+    feature_shap_vals = shap_values_array[:, feature_idx]
+
+    # 创建散点图，颜色基于NEP值，使用viridis颜色映射
+    scatter = ax.scatter(feature_vals, feature_shap_vals,
+                         c=y_test_for_viz, cmap='viridis', s=25, alpha=0.7, edgecolors='none')
+
+    # 添加趋势线 - 统一改为红色实线
+    try:
+        z = np.polyfit(feature_vals, feature_shap_vals, 1)
+        p = np.poly1d(z)
+        ax.plot(feature_vals, p(feature_vals), "r-", alpha=0.8, linewidth=2)
+    except:
+        pass
+
+    # 计算统计信息
+    median_val = np.median(feature_vals)
+    correlation = np.corrcoef(feature_vals, feature_shap_vals)[0, 1]
+
+    # 计算阈值
+    try:
+        sorted_vals = np.sort(feature_vals)
+        sorted_shap = feature_shap_vals[np.argsort(feature_vals)]
+        threshold_val = find_knee_point(sorted_vals, sorted_shap)
+    except:
+        threshold_val = np.percentile(feature_vals, 75)
+
+    # 添加参考线
+    ax.axvline(x=median_val, color='blue', linestyle='--', alpha=0.6, linewidth=1.5)
+    ax.axvline(x=threshold_val, color='red', linestyle='--', alpha=0.6, linewidth=1.5)
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=1)
+
+    # 特殊处理PAR图的信息框位置
+    feature_name_simple = feature_name_with_unit.split(' ')[0]  # 获取特征名称（去掉单位）
+
+    if 'PAR' in feature_name_simple:
+        # PAR图：将信息框放在右下角
+        best_pos = (0.95, 0.05)  # 右下角位置
+    else:
+        # 其他图：智能选择文本框位置
+        x_range = feature_vals.max() - feature_vals.min()
+        y_range = feature_shap_vals.max() - feature_shap_vals.min()
+
+        # 尝试不同位置，选择数据点密度最低的区域
+        positions = [
+            (0.05, 0.95), (0.95, 0.95), (0.05, 0.05), (0.95, 0.05),
+            (0.05, 0.5), (0.95, 0.5), (0.5, 0.95), (0.5, 0.05)
+        ]
+
+        best_pos = positions[0]
+        min_density = float('inf')
+
+        for pos in positions:
+            x_pos = feature_vals.min() + pos[0] * x_range
+            y_pos = feature_shap_vals.min() + pos[1] * y_range
+
+            # 计算该位置周围的点密度
+            x_mask = (feature_vals >= x_pos - 0.1 * x_range) & (feature_vals <= x_pos + 0.1 * x_range)
+            y_mask = (feature_shap_vals >= y_pos - 0.1 * y_range) & (feature_shap_vals <= y_pos + 0.1 * y_range)
+            density = np.sum(x_mask & y_mask)
+
+            if density < min_density:
+                min_density = density
+                best_pos = pos
+
+    # 添加统计信息文本框 - 调整字体大小（调大字体）
+    textstr = f'Corr: {correlation:.3f}\nMedian: {median_val:.3f}\nThreshold: {threshold_val:.3f}'
+    props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    ax.text(best_pos[0], best_pos[1], textstr, transform=ax.transAxes, fontsize=14,  # 从10调大到14
+            verticalalignment='bottom' if 'PAR' in feature_name_simple else ('top' if best_pos[1] > 0.5 else 'bottom'),
+            horizontalalignment='right' if 'PAR' in feature_name_simple else ('left' if best_pos[0] < 0.5 else 'right'),
+            bbox=props)
+
+    # 设置标签 - 调整字体大小避免重叠（调大字体）
+    ax.set_xlabel(feature_name_with_unit, fontsize=16)  # 从12调大到16
+    ax.set_ylabel('SHAP Value', fontsize=16)  # 从12调大到16
+
+    # 添加网格
+    ax.grid(True, alpha=0.3)
+    ax.set_axisbelow(True)
+
+    # 为每个子图添加颜色条 - 调整大小（调大字体）
+    cbar = plt.colorbar(scatter, ax=ax, shrink=0.6, aspect=15)
+    cbar.set_label('NEP\n(g C m⁻²)', fontsize=14)  # 从10调大到14
+    cbar.ax.tick_params(labelsize=13)  # 从9调大到13
+
+    # 设置坐标轴样式 - 调整字体大小（调大字体）
+    ax.spines['top'].set_linewidth(1.5)
+    ax.spines['right'].set_linewidth(1.5)
+    ax.spines['left'].set_linewidth(1.5)
+    ax.spines['bottom'].set_linewidth(1.5)
+    ax.tick_params(labelsize=14)  # 从10调大到14
+
+    # 缩减坐标轴标签数量，只保留3-4个值
+    ax.locator_params(axis='x', nbins=4)
+    ax.locator_params(axis='y', nbins=4)
+
+# 添加图例说明散点图和条形图
+legend_elements = [
+    Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, alpha=0.6, label='SHAP Values'),
+    Patch(facecolor='red', alpha=0.2, label='Feature Importance (Background)')
+]
+# 将图例位置向右移动，使用bbox_to_anchor参数精确控制位置
+ax_left.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(0.5, 0.05), fontsize=13)  # 从9调大到13
+
+# 添加总标题 - 调整字体大小和位置（调大字体）
+fig.suptitle('Comprehensive Machine Learning Feature Importance Visualization\nSHAP Analysis with Feature Correlations',
+             fontsize=22, y=0.96)  # 从18调大到22
+
+plt.tight_layout(rect=[0, 0, 1, 0.93])
+plt.savefig(os.path.join(output_dir, 'comprehensive_feature_importance.png'),
+            dpi=300, bbox_inches='tight', facecolor='white')
+plt.savefig(os.path.join(output_dir, 'comprehensive_feature_importance.tiff'),
+            dpi=300, bbox_inches='tight', facecolor='white')
+plt.close()
+
+print("✅ 综合机器学习特征重要性可视化图表创建成功")
+
+# ==================== 2. 前6个重要特征的依赖图面板（3×2布局） ====================
+print("\n=== 创建前6个重要特征的依赖图面板 ===")
+
+# 获取前6个最重要的特征
+top6_indices = all_sorted_indices[:6]
+top6_features = all_sorted_features[:6]
+
+print("依赖图面板将包含以下特征:")
+for i, (idx, feature_name) in enumerate(zip(top6_indices, top6_features)):
+    importance_val = all_mean_shap[idx]
+    print(f"  {i + 1}. {feature_name}: {importance_val:.6f}")
+
+# 创建3×2子图布局 - 增大画布尺寸，调整间距（调大字体）
+fig, axes = plt.subplots(3, 2, figsize=(18, 20))
+fig.suptitle('Top 6 Features SHAP Partial Dependence Plots\nFeature Impact on NEP Prediction',
+             fontsize=22, y=0.96)  # 从18调大到22
+
+for i, (feature_idx, feature_name) in enumerate(zip(top6_indices, top6_features)):
+    row = i // 2
+    col = i % 2
+    ax = axes[row, col]
+
+    print(f"正在创建特征 {feature_name} 的依赖图面板...")
+
+    # 直接使用手动创建的方法，不依赖SHAP内置函数
+    try:
+        # 手动创建部分依赖图
+        feature_vals = shap_data_array[:, feature_idx]
+        feature_min, feature_max = feature_vals.min(), feature_vals.max()
+        feature_range = np.linspace(feature_min, feature_max, 50)
+
+        partial_dependence = []
+        base_sample = np.mean(shap_data_array, axis=0)
+
+        # 计算部分依赖（删除SE填充部分）
+        for val in feature_range:
+            modified_sample = base_sample.copy()
+            modified_sample[feature_idx] = val
+            # 找到最接近的样本
+            distances = np.abs(feature_vals - val)
+            closest_indices = np.argsort(distances)[:50]  # 取最近的50个样本
+            pred = np.mean(y_test_for_viz[closest_indices])
+            partial_dependence.append(pred)
+
+        # 添加特征分布的直方图（背景）- 降低透明度，使用更浅的颜色
+        ax_twin = ax.twinx()
+        counts, bins, patches = ax_twin.hist(feature_vals, bins=30, density=True,
+                                             color='#E8E8E8', alpha=0.4,  # 更浅的灰色，更低透明度
+                                             label='Feature Density',
+                                             zorder=1)  # 背景层
+        ax_twin.set_ylabel('Density', fontsize=16, color='gray')  # 从12调大到16
+        ax_twin.tick_params(axis='y', labelcolor='gray', labelsize=15)  # 从11调大到15
+
+        # 添加白色边框线，增强对比度
+        ax.plot(feature_range, partial_dependence, color='white',
+                linewidth=6, alpha=0.8, zorder=3)  # 白色背景线
+
+        # 主要曲线 - 使用更深的蓝色，增加粗细
+        ax.plot(feature_range, partial_dependence, color='#1f4e79',
+                linewidth=4, label='Partial Dependence',
+                zorder=4, solid_capstyle='round')  # 更高层级，圆形端点
+
+        # 特征均值线 - 使用更鲜明的橙色，增加粗细
+        feature_mean = np.mean(feature_vals)
+        ax.axvline(x=feature_mean, color='#FF6B35', linestyle='--',
+                   linewidth=3, label=f'Mean ({feature_mean:.3f})',
+                   zorder=4, alpha=0.9)  # 前景层，更鲜明
+
+        # 添加基准线 - 使用更鲜明的红色，增加粗细
+        ax.axhline(y=expected_value, color='#DC143C', linestyle='--',
+                   alpha=0.9, linewidth=3, label=f'Baseline ({expected_value:.3f})',
+                   zorder=4)  # 前景层，更鲜明
+
+        ax.set_xlabel(f'{feature_name}', fontsize=18)  # 从14调大到18
+        ax.set_ylabel('Predicted NEP (g C m⁻²)', fontsize=18)  # 从14调大到18
+        ax.set_title(f'SHAP Partial Dependence Plot\n{feature_name} → NEP',
+                     fontsize=19, pad=15)  # 从15调大到19
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=15, loc='best')  # 从11调大到15
+
+        # 设置坐标轴范围
+        ax.set_xlim(feature_min, feature_max)
+        y_min = min(partial_dependence)
+        y_max = max(partial_dependence)
+        y_range = y_max - y_min
+        ax.set_ylim(y_min - 0.1 * y_range, y_max + 0.1 * y_range)
+
+    except Exception as e:
+        print(f"创建特征 {feature_name} 的依赖图时出错: {str(e)}")
+        # 如果还是失败，至少显示一些基本信息
+        ax.text(0.5, 0.5, f'Error creating plot for\n{feature_name}',
+                transform=ax.transAxes, ha='center', va='center', fontsize=16)  # 从12调大到16
+        ax.set_title(f'{feature_name} → NEP\nRank: {i + 1}',
+                     fontsize=19, pad=15)  # 从15调大到19
+
+    # 设置坐标轴样式
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(1.0)
+    ax.spines['bottom'].set_linewidth(1.0)
+
+plt.tight_layout(rect=[0, 0, 1, 0.93])
+plt.savefig(os.path.join(output_dir, 'top6_features_dependence_plots.png'),
+            dpi=300, bbox_inches='tight', facecolor='white')
+plt.savefig(os.path.join(output_dir, 'top6_features_dependence_plots.tiff'),
+            dpi=300, bbox_inches='tight', facecolor='white')
+plt.close()
+
+print("✅ 前6个重要特征的依赖图面板创建成功")
+
+print(f"\n所有文件已保存至: {output_dir}")
