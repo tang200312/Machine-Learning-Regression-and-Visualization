@@ -1,0 +1,562 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.svm import SVR
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.model_selection import GridSearchCV, KFold, cross_val_score, train_test_split
+import os
+import time
+import joblib
+from tqdm import tqdm  # 导入tqdm进度条库
+import itertools  # 添加itertools导入
+import optuna  # 导入Optuna库
+
+# 创建输出目录（如果不存在）
+output_dir = "F:\\Machine leaning_SHAP\\KNN2"
+os.makedirs(output_dir, exist_ok=True)
+
+# 设置中文显示
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+
+# 读取统一数据集
+print("正在读取统一数据集...")
+data = pd.read_excel("F:\\Machine leaning_SHAP\\数据集.xlsx")
+print(f"数据集读取完成! 总共: {data.shape[0]}行, {data.shape[1]}列")
+
+# 定义特征和目标变量
+features = ["TA", "RH", "P", "SP", "SD", "ATM", "PAR", "TS", "shallow_SWC", "deep_SWC"]
+target = "NEP"
+
+# 提取特征和目标变量
+X = data[features]
+y = data[target]
+
+# 按照指定比例划分数据集
+print("正在划分数据集...")
+# 训练集21888条，验证集7344条，测试集5856条
+total_samples = len(data)
+train_size = 21888
+val_size = 7344
+test_size = 5856
+
+print(f"总样本数: {total_samples}")
+print(f"训练集: {train_size}条")
+print(f"验证集: {val_size}条")
+print(f"测试集: {test_size}条")
+
+# 首先分离出测试集
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=test_size, random_state=42, shuffle=True
+)
+
+# 然后从剩余数据中分离训练集和验证集
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=val_size, random_state=42, shuffle=True
+)
+
+print(f"实际划分结果:")
+print(f"训练集: {X_train.shape[0]}行")
+print(f"验证集: {X_val.shape[0]}行")
+print(f"测试集: {X_test.shape[0]}行")
+
+# 数据归一化
+print("正在进行数据归一化...")
+scaler = MinMaxScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_test_scaled = scaler.transform(X_test)
+print("数据归一化完成!")
+
+# 合并训练集和验证集用于交叉验证
+X_train_val = np.vstack((X_train_scaled, X_val_scaled))
+y_train_val = pd.concat([y_train, y_val])
+
+# 使用网格搜索进行粗调
+print("\n" + "=" * 50)
+print("开始网格搜索粗调...")
+start_time = time.time()
+
+# 定义参数网格（选择最重要的三个参数）
+param_grid = {
+    'kernel': ['linear', 'rbf', 'poly', 'sigmoid'],
+    'C': [0.1, 1, 10, 100, 1000],
+    'gamma': ['scale', 'auto', 0.001, 0.01, 0.1, 1]
+}
+
+# 计算总参数组合数
+total_combinations = len(param_grid['kernel']) * len(param_grid['C']) * len(param_grid['gamma'])
+print(f"总共需要评估 {total_combinations} 种参数组合，每种组合进行3折交叉验证")
+print(f"预计总共需要训练 {total_combinations * 3} 个模型")
+
+# 定义三折交叉验证
+cv = KFold(n_splits=3, shuffle=True, random_state=42)
+
+
+# 创建自定义的回调函数来显示进度
+class ProgressCallback:
+    def __init__(self, total):
+        self.total = total
+        self.current = 0
+        self.start_time = time.time()
+
+    def __call__(self, params, score, rank):
+        self.current += 1
+        elapsed_time = time.time() - self.start_time
+        avg_time_per_iter = elapsed_time / self.current if self.current > 0 else 0
+        estimated_remaining = avg_time_per_iter * (self.total - self.current)
+
+        progress = self.current / self.total * 100
+        print(f"\r进度: [{self.current}/{self.total}] {progress:.1f}% | "
+              f"已用时间: {elapsed_time:.1f}秒 | "
+              f"预计剩余: {estimated_remaining:.1f}秒 | "
+              f"当前参数: {params} | "
+              f"得分: {score:.4f}", end="")
+
+        # 每10个组合或最后一个组合时换行
+        if self.current % 10 == 0 or self.current == self.total:
+            print()
+
+
+# 创建网格搜索对象
+grid_search = GridSearchCV(
+    estimator=SVR(),
+    param_grid=param_grid,
+    cv=cv,
+    scoring='neg_mean_squared_error',
+    verbose=0,  # 设为0，使用自定义进度显示
+    n_jobs=1  # 修改为1，禁用并行处理
+)
+
+# 创建进度回调
+progress_callback = ProgressCallback(total_combinations)
+
+# 执行网格搜索
+try:
+    # 使用tqdm包装参数组合
+    param_combinations = [dict(zip(param_grid.keys(), values)) for values in
+                          tqdm(list(itertools.product(*param_grid.values())),
+                               desc="参数搜索进度",
+                               total=total_combinations)]
+
+    # 手动执行网格搜索以显示进度
+    best_score = float('-inf')
+    best_params = None
+    scores = []
+
+    for i, params in enumerate(param_combinations):
+        # 创建模型
+        model = SVR(**params)
+
+        # 执行交叉验证
+        fold_scores = []
+        for train_idx, val_idx in cv.split(X_train_val):
+            X_fold_train, X_fold_val = X_train_val[train_idx], X_train_val[val_idx]
+            y_fold_train, y_fold_val = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
+
+            model.fit(X_fold_train, y_fold_train)
+            y_pred = model.predict(X_fold_val)
+            score = -mean_squared_error(y_fold_val, y_pred)  # 负MSE
+            fold_scores.append(score)
+
+        # 计算平均分数
+        mean_score = np.mean(fold_scores)
+        scores.append((params, mean_score))
+
+        # 更新最佳分数和参数
+        if mean_score > best_score:
+            best_score = mean_score
+            best_params = params
+
+        # 更新进度
+        progress_callback(params, mean_score, i + 1)
+
+    # 将结果转换为GridSearchCV期望的格式
+    grid_search.cv_results_ = {
+        'params': [s[0] for s in scores],
+        'mean_test_score': np.array([s[1] for s in scores])
+    }
+    grid_search.best_params_ = best_params
+    grid_search.best_score_ = best_score
+
+except ImportError:
+    # 如果没有tqdm，使用原始的GridSearchCV
+    print("未找到tqdm库，使用标准进度显示...")
+    grid_search.fit(X_train_val, y_train_val)
+
+# 输出最佳参数
+print("\n网格搜索最佳参数:")
+print(grid_search.best_params_)
+print(f"最佳MSE: {-grid_search.best_score_:.4f}")
+print(f"最佳RMSE: {np.sqrt(-grid_search.best_score_):.4f}")
+
+end_time = time.time()
+print(f"网格搜索耗时: {end_time - start_time:.2f}秒")
+print("=" * 50 + "\n")
+
+# 保存网格搜索结果
+grid_results = pd.DataFrame(grid_search.cv_results_)
+grid_results.to_excel(os.path.join(output_dir, "SVM_网格搜索结果.xlsx"), index=False)
+
+# 获取网格搜索的最佳参数
+best_kernel = grid_search.best_params_['kernel']
+best_C = grid_search.best_params_['C']
+best_gamma = grid_search.best_params_['gamma']
+
+# ====================== Optuna精调部分 ======================
+print("\n" + "=" * 50)
+print("开始Optuna精调...")
+start_time = time.time()
+
+
+# 定义Optuna早停回调函数
+class EarlyStoppingCallback:
+    def __init__(self, patience=30, min_delta=0.0005):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_value = float('inf')
+        self.no_improvement_count = 0
+
+    def __call__(self, study, trial):
+        current_value = trial.value
+
+        # 如果当前值比最佳值更好（更小）
+        if current_value < self.best_value - self.min_delta:
+            self.best_value = current_value
+            self.no_improvement_count = 0
+        else:
+            self.no_improvement_count += 1
+
+        # 如果连续多次没有改善，则停止
+        if self.no_improvement_count >= self.patience:
+            study.stop()
+            print(f"\n早停: {self.patience}次试验内没有改善，停止优化")
+
+
+# 定义进度回调函数
+class TqdmCallback:
+    def __init__(self, total):
+        self.pbar = tqdm(total=total, desc="Optuna优化进度")
+
+    def __call__(self, study, trial):
+        self.pbar.update(1)
+        # 显示当前最佳值
+        self.pbar.set_postfix({"最佳MSE": f"{study.best_value:.4f}"})
+
+
+# 定义五折交叉验证
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+
+# 定义目标函数
+def objective(trial):
+    # 基于网格搜索的最佳结果，定义更精细的搜索范围
+    kernel = trial.suggest_categorical('kernel', [best_kernel])  # 使用网格搜索找到的最佳kernel
+
+    # 对C参数进行更精细的搜索
+    if best_C <= 0.1:
+        C = trial.suggest_float('C', 0.01, 1.0, log=True)
+    elif best_C >= 1000:
+        C = trial.suggest_float('C', 100, 10000, log=True)
+    else:
+        C = trial.suggest_float('C', best_C / 5, best_C * 5, log=True)
+
+    # 对gamma参数进行更精细的搜索
+    if best_gamma == 'scale' or best_gamma == 'auto':
+        gamma = trial.suggest_categorical('gamma', ['scale', 'auto'])
+    else:
+        gamma_value = float(best_gamma)
+        gamma = trial.suggest_float('gamma', gamma_value / 10, gamma_value * 10, log=True)
+
+    # 添加epsilon参数（SVR特有）
+    epsilon = trial.suggest_float('epsilon', 0.001, 0.5, log=True)
+
+    # 添加degree参数（仅在kernel='poly'时有效）
+    degree = 3  # 默认值
+    if kernel == 'poly':
+        degree = trial.suggest_int('degree', 2, 5)
+
+    # 创建模型
+    model = SVR(
+        kernel=kernel,
+        C=C,
+        gamma=gamma,
+        epsilon=epsilon,
+        degree=degree if kernel == 'poly' else 3,
+        cache_size=1000  # 增加缓存大小以加速训练
+    )
+
+    # 使用五折交叉验证评估模型
+    scores = []
+    for train_idx, val_idx in kf.split(X_train_val):
+        X_fold_train, X_fold_val = X_train_val[train_idx], X_train_val[val_idx]
+        y_fold_train, y_fold_val = y_train_val.iloc[train_idx], y_train_val.iloc[val_idx]
+
+        model.fit(X_fold_train, y_fold_train)
+        y_pred = model.predict(X_fold_val)
+        mse = mean_squared_error(y_fold_val, y_pred)
+        scores.append(mse)
+
+    # 返回平均MSE
+    return np.mean(scores)
+
+
+# 创建Optuna研究对象
+study = optuna.create_study(direction='minimize')
+
+# 设置回调函数
+early_stopping = EarlyStoppingCallback(patience=30, min_delta=0.0001)
+tqdm_callback = TqdmCallback(total=200)
+
+# 运行优化
+print(f"开始Optuna优化，最大试验次数: 200，使用5折交叉验证")
+try:
+    study.optimize(objective, n_trials=200, callbacks=[early_stopping, tqdm_callback])
+except KeyboardInterrupt:
+    print("\n用户中断优化")
+except Exception as e:
+    print(f"\n优化过程中出错: {e}")
+
+# 输出最佳参数
+print("\nOptuna优化最佳参数:")
+for param_name, param_value in study.best_params.items():
+    print(f"{param_name}: {param_value}")
+print(f"最佳MSE: {study.best_value:.4f}")
+print(f"最佳RMSE: {np.sqrt(study.best_value):.4f}")
+
+end_time = time.time()
+print(f"Optuna优化耗时: {end_time - start_time:.2f}秒")
+print("=" * 50 + "\n")
+
+# 保存Optuna优化历史
+optuna_history = study.trials_dataframe()
+optuna_history.to_excel(os.path.join(output_dir, "SVM_Optuna优化历史.xlsx"), index=False)
+
+# 绘制优化历史图 - 使用matplotlib替代Plotly
+print("正在绘制Optuna优化历史图...")
+# 创建图形并设置位置（放在右侧）
+fig, ax = plt.subplots(figsize=(12, 6))
+fig.subplots_adjust(right=0.85)  # 调整右边距，使图表靠右显示
+
+# 提取Optuna的结果
+optuna_values = [t.value for t in study.trials if t.value is not None]
+optuna_iterations = list(range(1, len(optuna_values) + 1))
+
+# 绘制优化历史
+ax.plot(optuna_iterations, optuna_values, 'o-', color='blue')
+ax.set_xlabel('试验次数')
+ax.set_ylabel('MSE')
+ax.set_title('Optuna优化历史')
+ax.grid(True)
+
+# 标记最佳点
+best_trial_number = study.best_trial.number + 1  # 索引从0开始，显示从1开始
+ax.plot(best_trial_number, study.best_value, 'ro', markersize=10, label=f'最佳值: {study.best_value:.6f}')
+ax.legend(loc='upper right')
+
+# 保存图像
+plt.savefig(os.path.join(output_dir, "SVM_Optuna优化历史.png"), dpi=300, bbox_inches='tight')
+plt.close()
+
+# 绘制参数重要性图 - 使用matplotlib替代Plotly
+print("正在绘制参数重要性图...")
+# 获取参数重要性
+try:
+    importance = optuna.importance.get_param_importances(study)
+    # 创建图形并设置位置（放在右侧）
+    fig, ax = plt.subplots(figsize=(12, 8))
+    fig.subplots_adjust(right=0.85)  # 调整右边距，使图表靠右显示
+
+    # 绘制参数重要性条形图
+    params = list(importance.keys())
+    values = list(importance.values())
+    y_pos = np.arange(len(params))
+    ax.barh(y_pos, values, align='center')
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(params)
+    ax.invert_yaxis()  # 最重要的参数显示在顶部
+    ax.set_xlabel('重要性')
+    ax.set_title('参数重要性')
+
+    # 保存图像
+    plt.savefig(os.path.join(output_dir, "SVM_Optuna参数重要性.png"), dpi=300, bbox_inches='tight')
+    plt.close()
+except (ValueError, RuntimeError) as e:
+    print(f"无法计算参数重要性: {e}")
+    print("跳过参数重要性图绘制")
+
+print("优化历史图绘制完成!")
+
+# 使用最佳参数创建最终模型
+best_params = study.best_params
+final_model = SVR(
+    kernel=best_params.get('kernel', best_kernel),
+    C=best_params.get('C', best_C),
+    gamma=best_params.get('gamma', best_gamma),
+    epsilon=best_params.get('epsilon', 0.1),
+    degree=best_params.get('degree', 3) if best_params.get('kernel', best_kernel) == 'poly' else 3
+)
+
+# 训练最终模型
+print("训练最终模型...")
+final_model.fit(X_train_scaled, y_train)
+print("最终模型训练完成!")
+
+# 保存模型
+print("正在保存模型...")
+joblib.dump(final_model, os.path.join(output_dir, "SVM_最终模型.pkl"))
+joblib.dump(scaler, os.path.join(output_dir, "SVM_特征缩放器.pkl"))
+print("模型保存完成!")
+
+# 预测
+print("\n正在进行预测...")
+y_train_pred = final_model.predict(X_train_scaled)
+y_val_pred = final_model.predict(X_val_scaled)
+y_test_pred = final_model.predict(X_test_scaled)
+print("预测完成!")
+
+# 绘制网格搜索结果图
+print("\n正在绘制网格搜索结果图...")
+plt.figure(figsize=(12, 6))
+
+# 提取网格搜索的结果
+grid_results_sorted = grid_results.sort_values('mean_test_score', ascending=False)
+top_grid_scores = -grid_results_sorted['mean_test_score'].values[:20]  # 取前20个最好的结果
+
+# 绘制网格搜索结果
+plt.plot(range(1, len(top_grid_scores) + 1), top_grid_scores, 'bo-')
+plt.xlabel('参数组合排名')
+plt.ylabel('MSE')
+plt.title('网格搜索Top20结果')
+plt.grid(True)
+plt.savefig(os.path.join(output_dir, "SVM_网格搜索结果.png"), dpi=300, bbox_inches='tight')
+plt.close()
+print("网格搜索结果图绘制完成!")
+
+# 绘制Optuna优化过程中的损失曲线
+print("正在绘制Optuna优化损失曲线...")
+plt.figure(figsize=(12, 6))
+
+# 提取Optuna的结果
+optuna_values = [t.value for t in study.trials if t.value is not None]
+optuna_iterations = list(range(1, len(optuna_values) + 1))
+
+# 绘制Optuna优化损失曲线
+plt.plot(optuna_iterations, optuna_values, 'ro-')
+plt.xlabel('试验次数')
+plt.ylabel('MSE')
+plt.title('Optuna优化损失曲线')
+plt.grid(True)
+plt.savefig(os.path.join(output_dir, "SVM_Optuna优化损失曲线.png"), dpi=300, bbox_inches='tight')
+plt.close()
+print("Optuna优化损失曲线绘制完成!")
+
+
+# 评估函数
+def evaluate_model(y_true, y_pred, dataset_name):
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+
+    print(f"{dataset_name} 评估指标:")
+    print(f"R² = {r2:.4f}")
+    print(f"MAE = {mae:.4f}")
+    print(f"MSE = {mse:.4f}")
+    print(f"RMSE = {rmse:.4f}")
+    print("\n")
+
+    return {
+        "R²": r2,
+        "MAE": mae,
+        "MSE": mse,
+        "RMSE": rmse
+    }
+
+
+# 评估模型
+print("\n正在评估模型性能...")
+train_metrics = evaluate_model(y_train, y_train_pred, "训练集")
+val_metrics = evaluate_model(y_val, y_val_pred, "验证集")
+test_metrics = evaluate_model(y_test, y_test_pred, "测试集")
+
+# 将评估指标保存到Excel
+metrics_df = pd.DataFrame({
+    "指标": ["R²", "MAE", "MSE", "RMSE"],
+    "训练集": [train_metrics["R²"], train_metrics["MAE"], train_metrics["MSE"], train_metrics["RMSE"]],
+    "验证集": [val_metrics["R²"], val_metrics["MAE"], val_metrics["MSE"], val_metrics["RMSE"]],
+    "测试集": [test_metrics["R²"], test_metrics["MAE"], test_metrics["MSE"], test_metrics["RMSE"]]
+})
+metrics_df.to_excel(os.path.join(output_dir, "SVM_评估指标.xlsx"), index=False)
+print("评估指标已保存!")
+
+
+# 绘制实际值与预测值的对比图
+def plot_actual_vs_predicted(y_true, y_pred, title, filename):
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_true, y_pred, alpha=0.5)
+
+    # 添加对角线（理想预测线）
+    min_val = min(min(y_true), min(y_pred))
+    max_val = max(max(y_true), max(y_pred))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--')
+
+    plt.xlabel('实际值')
+    plt.ylabel('预测值')
+    plt.title(title)
+    plt.grid(True)
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+# 绘制实际值与预测值的对比图
+print("\n正在绘制实际值与预测值对比图...")
+plot_actual_vs_predicted(y_train, y_train_pred, "训练集：实际值 vs 预测值",
+                         os.path.join(output_dir, "SVM_训练集_实际vs预测.png"))
+plot_actual_vs_predicted(y_val, y_val_pred, "验证集：实际值 vs 预测值",
+                         os.path.join(output_dir, "SVM_验证集_实际vs预测.png"))
+plot_actual_vs_predicted(y_test, y_test_pred, "测试集：实际值 vs 预测值",
+                         os.path.join(output_dir, "SVM_测试集_实际vs预测.png"))
+print("对比图绘制完成!")
+
+
+# 保存预测结果
+def save_predictions(X_data, y_true, y_pred, filename):
+    # 创建结果DataFrame
+    result_df = pd.DataFrame(X_data, columns=features)
+    result_df[target] = y_true.values
+    result_df['预测值'] = y_pred
+    result_df['残差'] = y_true.values - y_pred
+    # 保存到Excel
+    result_df.to_excel(filename, index=False)
+
+
+# 保存预测结果
+print("\n正在保存预测结果...")
+save_predictions(X_train, y_train, y_train_pred, os.path.join(output_dir, "SVM_训练集_预测结果.xlsx"))
+save_predictions(X_val, y_val, y_val_pred, os.path.join(output_dir, "SVM_验证集_预测结果.xlsx"))
+save_predictions(X_test, y_test, y_test_pred, os.path.join(output_dir, "SVM_测试集_预测结果.xlsx"))
+print("预测结果保存完成!")
+
+# 保存调参结果
+print("\n正在保存调参结果...")
+with open(os.path.join(output_dir, "SVM_调参结果.txt"), "w") as f:
+    f.write("SVM模型网格搜索结果:\n\n")
+    f.write("最佳参数:\n")
+    for param, value in grid_search.best_params_.items():
+        f.write(f"{param}: {value}\n")
+    f.write(f"最佳MSE: {-grid_search.best_score_:.4f}\n")
+    f.write(f"最佳RMSE: {np.sqrt(-grid_search.best_score_):.4f}\n\n")
+
+    f.write("SVM模型Optuna精调结果:\n\n")
+    f.write("最佳参数:\n")
+    for param, value in study.best_params.items():
+        f.write(f"{param}: {value}\n")
+    f.write(f"最佳MSE: {study.best_value:.4f}\n")
+    f.write(f"最佳RMSE: {np.sqrt(study.best_value):.4f}\n")
+print("调参结果保存完成!")
+
+print("\n" + "=" * 50)
+print("所有结果已保存到目录：", output_dir)
+print("=" * 50)
