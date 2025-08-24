@@ -1,0 +1,276 @@
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.patches import Patch
+from datetime import datetime
+import warnings
+import shap
+warnings.filterwarnings('ignore')
+# 字体设置 - 仅英文
+def setup_fonts():
+    """设置字体配置，仅英文"""
+    plt.rcParams['font.family'] = ['Times New Roman']
+    plt.rcParams['font.serif'] = ['Times New Roman']
+    plt.rcParams['axes.unicode_minus'] = False
+    plt.rcParams['font.size'] = 12
+    plt.rcParams['axes.titlesize'] = 14
+    plt.rcParams['axes.labelsize'] = 12
+    plt.rcParams['xtick.labelsize'] = 10
+    plt.rcParams['ytick.labelsize'] = 10
+    plt.rcParams['legend.fontsize'] = 10
+setup_fonts()
+# 设置路径
+output_dir = r"F:\Machine leaning_SHAP\TabNet\figure"
+shap_data_path = r"F:\Machine leaning_SHAP\TabNet\date_shap\shap_data.npz"
+print("=" * 60)
+print("SHAP可视化 - 仅绘图模式（使用预计算的SHAP值）")
+print("=" * 60)
+# 检查SHAP数据文件是否存在
+if not os.path.exists(shap_data_path):
+    print(f"❌ 错误：找不到SHAP数据文件: {shap_data_path}")
+    print("请先运行完整的TabNet_Enhanced_Simplified.py生成SHAP数据")
+    exit()
+# 检查输出目录是否存在，如果不存在则创建
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+    print(f"✅ 创建输出目录: {output_dir}")
+# 加载SHAP数据
+print("正在加载预计算的SHAP数据...")
+try:
+    shap_data_loaded = np.load(shap_data_path, allow_pickle=True)
+    
+    # 提取数据
+    shap_values_array = shap_data_loaded['shap_values']
+    shap_data_array = shap_data_loaded['shap_data']
+    expected_value = float(shap_data_loaded['expected_value'])
+    features = shap_data_loaded['features'].tolist()
+    feature_names_en = shap_data_loaded['feature_names_en'].item()
+    feature_units = shap_data_loaded['feature_units'].item()
+    background_data = shap_data_loaded['background_data']
+    y_test_subset = shap_data_loaded['y_test_subset']
+    background_size = int(shap_data_loaded['background_size'])
+    shap_size = int(shap_data_loaded['shap_size'])
+    
+    print(f"✅ SHAP数据加载成功!")
+    print(f"   - SHAP值矩阵形状: {shap_values_array.shape}")
+    print(f"   - 特征数据形状: {shap_data_array.shape}")
+    print(f"   - 基准值: {expected_value:.4f}")
+    print(f"   - 样本数量: {shap_size}")
+    
+except Exception as e:
+    print(f"❌ 加载SHAP数据时出错: {str(e)}")
+    exit()
+# 创建带单位的特征名称函数
+def get_feature_name_with_unit(feature_name):
+    """获取带单位的特征名称"""
+    if feature_name in feature_units:
+        return f"{feature_name} ({feature_units[feature_name]})"
+    return feature_name
+# 学术论文字体设置 - 增大字体尺寸
+plt.rcParams.update({
+    'font.family': 'Times New Roman',
+    'font.size': 14,
+    'axes.titlesize': 18,
+    'axes.labelsize': 16,
+    'xtick.labelsize': 14,
+    'ytick.labelsize': 14,
+    'legend.fontsize': 14,
+    'figure.titlesize': 20,
+    'axes.linewidth': 1.5,
+    'grid.linewidth': 1.0,
+    'lines.linewidth': 2.0
+})
+# 计算特征重要性
+mean_abs_shap = np.abs(shap_values_array).mean(0)
+feature_importance_df = pd.DataFrame({
+    'Feature': [feature_names_en[f] for f in features],
+    'Importance': mean_abs_shap,
+    'Feature_Index': range(len(features))
+}).sort_values('Importance', ascending=False)
+print("\n" + "=" * 60)
+print("开始绘制SHAP可视化图表")
+print("=" * 60)
+# ==================== 1. SHAP Force Plot（瀑布图） ====================
+print("\n=== 创建SHAP Force Plot（瀑布图） ===")
+# 准备特征名称
+feature_names_list = [feature_names_en[f] for f in features]
+# 创建单个样本的SHAP Force Plot
+print("正在生成SHAP Force Plot...")
+# 选择一个代表性样本（例如预测值接近中位数的样本）
+all_predictions = expected_value + np.sum(shap_values_array, axis=1)
+median_pred = np.median(all_predictions)
+median_idx = np.argmin(np.abs(all_predictions - median_pred))
+print(f"选择样本索引 {median_idx}，预测值: {all_predictions[median_idx]:.3f}")
+# 创建单个样本的force plot
+force_plot = shap.force_plot(
+    expected_value, 
+    shap_values_array[median_idx], 
+    shap_data_array[median_idx],
+    feature_names=feature_names_list,
+    matplotlib=True,
+    show=False
+)
+# 保存force plot
+plt.savefig(os.path.join(output_dir, 'shap_force_plot_single.png'), 
+           dpi=300, bbox_inches='tight', facecolor='white')
+plt.savefig(os.path.join(output_dir, 'shap_force_plot_single.tiff'), 
+           dpi=300, bbox_inches='tight', facecolor='white')
+plt.close()
+print("✅ SHAP Force Plot（单样本瀑布图）创建成功")
+# 如果需要多样本的force plot，使用HTML格式
+print("\n=== 创建多样本SHAP Force Plot（HTML格式） ===")
+# 选择前100个样本用于HTML force plot
+n_samples_html = min(100, len(shap_values_array))
+sample_indices = np.random.choice(len(shap_values_array), n_samples_html, replace=False)
+# 创建HTML格式的多样本force plot
+force_plot_html = shap.force_plot(
+    expected_value, 
+    shap_values_array[sample_indices], 
+    shap_data_array[sample_indices],
+    feature_names=feature_names_list
+)
+# 保存HTML force plot
+shap.save_html(os.path.join(output_dir, 'shap_force_plot_multi.html'), force_plot_html)
+print("✅ 多样本SHAP Force Plot（HTML格式）创建成功")
+# ==================== 2. 2000个样本的综合力图 ====================
+print("\n=== 创建2000个样本的综合力图 ===")
+# 限制样本数量为2000个（如果数据量更大的话）
+n_samples = min(2000, len(shap_values_array))
+sample_indices = np.random.choice(len(shap_values_array), n_samples, replace=False)
+# 创建综合力图
+fig, ax = plt.subplots(figsize=(16, 10))
+print(f"正在绘制 {n_samples} 个样本的综合力图...")
+# 堆叠绘制所有样本
+for i, sample_idx in enumerate(sample_indices):
+    # 计算累积SHAP值
+    cumulative = np.cumsum(np.concatenate([[expected_value], shap_values_array[sample_idx]]))
+    
+    # 为每个特征的SHAP值绘制堆叠条
+    for j in range(len(shap_values_array[sample_idx])):
+        # 红色=正贡献，蓝绿色=负贡献
+        color = '#FF6B6B' if shap_values_array[sample_idx][j] > 0 else '#4ECDC4'
+        alpha = 0.6 if abs(shap_values_array[sample_idx][j]) > 0.01 else 0.3  # 根据贡献大小调整透明度
+        
+        ax.fill_between([i-0.4, i+0.4], 
+                       cumulative[j], cumulative[j+1], 
+                       color=color, alpha=alpha, edgecolor='none')
+# 添加基准线（期望值）
+ax.axhline(y=expected_value, color='black', linestyle='--', linewidth=2, 
+           label=f'基准值 (期望值: {expected_value:.3f})')
+# 设置标签和标题
+ax.set_xlabel('样本索引', fontsize=15)
+ax.set_ylabel('预测值 (g C m⁻²)', fontsize=15)
+ax.set_title(f'SHAP综合力图 - {n_samples}个样本的特征贡献堆叠\n红色=正贡献, 蓝绿色=负贡献', 
+            fontsize=18, pad=20)
+# 添加图例
+legend_elements = [
+    Patch(facecolor='#FF6B6B', alpha=0.6, label='正贡献 (增加预测值)'),
+    Patch(facecolor='#4ECDC4', alpha=0.6, label='负贡献 (减少预测值)'),
+    plt.Line2D([0], [0], color='black', linestyle='--', linewidth=2, label=f'基准值 ({expected_value:.3f})')
+]
+ax.legend(handles=legend_elements, fontsize=12, loc='upper right')
+# 设置网格
+ax.grid(True, alpha=0.3)
+ax.set_axisbelow(True)
+# 设置坐标轴样式
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['left'].set_linewidth(1.5)
+ax.spines['bottom'].set_linewidth(1.5)
+ax.tick_params(labelsize=12)
+# 设置x轴范围和标签
+ax.set_xlim(-0.5, n_samples-0.5)
+# 如果样本太多，减少x轴标签数量
+if n_samples > 100:
+    ax.locator_params(axis='x', nbins=10)
+else:
+    ax.locator_params(axis='x', nbins=min(20, n_samples//10))
+ax.locator_params(axis='y', nbins=8)
+# 添加统计信息文本框
+# 计算一些统计信息
+final_predictions = []
+for sample_idx in sample_indices:
+    final_pred = expected_value + np.sum(shap_values_array[sample_idx])
+    final_predictions.append(final_pred)
+final_predictions = np.array(final_predictions)
+pred_mean = np.mean(final_predictions)
+pred_std = np.std(final_predictions)
+pred_min = np.min(final_predictions)
+pred_max = np.max(final_predictions)
+stats_text = f'预测统计:\n平均值: {pred_mean:.3f}\n标准差: {pred_std:.3f}\n范围: [{pred_min:.3f}, {pred_max:.3f}]'
+props = dict(boxstyle='round', facecolor='lightblue', alpha=0.8)
+ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
+        verticalalignment='top', bbox=props)
+plt.tight_layout()
+# 保存图表
+plt.savefig(os.path.join(output_dir, 'shap_force_plot_comprehensive_v2.png'), 
+           dpi=300, bbox_inches='tight', facecolor='white')
+plt.savefig(os.path.join(output_dir, 'shap_force_plot_comprehensive_v2.tiff'), 
+           dpi=300, bbox_inches='tight', facecolor='white')
+plt.close()
+print("✅ 2000个样本的综合力图创建成功")
+# ==================== 3. Beeswarm Plot（蜂群图） ====================
+print("\n=== 创建Beeswarm Plot（蜂群图） ===")
+# 创建Beeswarm Plot
+fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+# 按重要性排序特征
+sorted_indices = np.argsort(mean_abs_shap)
+sorted_features = [get_feature_name_with_unit(feature_names_en[features[i]]) for i in sorted_indices]
+# 为每个特征创建蜂群效果
+y_positions = np.arange(len(sorted_features))
+for i, feature_idx in enumerate(sorted_indices):
+    feature_shap_vals = shap_values_array[:, feature_idx]
+    feature_vals = shap_data_array[:, feature_idx]
+    
+    # 标准化特征值用于颜色映射
+    if feature_vals.max() != feature_vals.min():
+        norm_feature_vals = (feature_vals - feature_vals.min()) / (feature_vals.max() - feature_vals.min())
+    else:
+        norm_feature_vals = np.zeros_like(feature_vals)
+    
+    # 添加随机抖动实现蜂群效果
+    y_jitter = np.random.normal(0, 0.1, len(feature_shap_vals))
+    y_pos = np.full(len(feature_shap_vals), i) + y_jitter
+    
+    # 创建散点图，使用viridis颜色映射
+    scatter = ax.scatter(feature_shap_vals, y_pos, 
+                       c=norm_feature_vals, cmap='viridis', 
+                       s=20, alpha=0.6, edgecolors='none')
+# 设置y轴标签
+ax.set_yticks(y_positions)
+ax.set_yticklabels(sorted_features, fontsize=12)
+# 添加颜色条
+cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
+cbar.set_label('Feature Value\n(Low → High)', fontsize=11)
+cbar.ax.tick_params(labelsize=10)
+# 添加零线
+ax.axvline(x=0, color='black', linestyle='-', alpha=0.3, linewidth=1)
+# 设置标签和标题
+ax.set_xlabel('SHAP Value (Impact on Model Output)', fontsize=14)
+ax.set_title('SHAP Beeswarm Plot\nFeature Impact Distribution with Value Encoding', 
+            fontsize=16, pad=20)
+ax.grid(True, alpha=0.3, axis='x')
+ax.set_axisbelow(True)
+# 设置坐标轴样式
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.spines['left'].set_linewidth(1.5)
+ax.spines['bottom'].set_linewidth(1.5)
+ax.tick_params(labelsize=11)
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'shap_beeswarm_plot_v2.png'), dpi=300, bbox_inches='tight')
+plt.savefig(os.path.join(output_dir, 'shap_beeswarm_plot_v2.tiff'), dpi=300, bbox_inches='tight')
+plt.close()
+print("✅ Beeswarm Plot（蜂群图）创建成功")
+print("\n" + "=" * 60)
+print("SHAP可视化完成！")
+print("=" * 60)
+print("生成的图表文件:")
+print("- SHAP Force Plot (单样本): shap_force_plot_single.png/tiff")
+print("- SHAP Force Plot (多样本HTML): shap_force_plot_multi.html")
+print("- 2000个样本综合力图: shap_force_plot_comprehensive_v2.png/tiff")
+print("- Beeswarm Plot: shap_beeswarm_plot_v2.png/tiff")
+print(f"\n所有文件已保存至: {output_dir}")
